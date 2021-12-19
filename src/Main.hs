@@ -9,13 +9,14 @@ import Text.ParserCombinators.Parsec hiding (token, tokens)
 import System.Environment (getArgs)
 import System.FilePath.Glob
 import ClassWriter
+import Debug.Trace
 
 main :: IO ()
 main = do
   args <- getArgs
   let (optionMap, fileGlobs) = getCommandLineOptions args
   srcFiles <- foldM (\l a -> (fmap (\files -> l ++ files) (glob a))) [] fileGlobs
-  step1Result <- foldM (\m file -> (fmap (\eitherMap -> (mergeMaps m eitherMap)) (lexAndParse file))) (Right Map.empty) srcFiles
+  step1Result <- foldM (\m file -> (fmap (\eitherList -> (pure (++) <*> eitherList <*> m)) (lexAndParse file))) (Right []) srcFiles
   let parserResult = step1Result >>= parseClasses2
   case parserResult of
     Left e -> putStrLn (show e)
@@ -28,10 +29,10 @@ main = do
             Right typedClazzes -> forM_ typedClazzes (writeClass (optionMap Map.! "-d"))
             Left errorList2 -> (displayTypeErrors errorList2) >> (putStrLn (show ast))
 
-lexAndParse :: FilePath -> IO (Either ParseError (Map.Map String Clazz))
+lexAndParse :: FilePath -> IO (Either ParseError [Clazz])
 lexAndParse file = do
   lexResult <- (tokenizeFromFile file)
-  return $ lexResult >>= parseClasses
+  return $ trace (show lexResult) $ lexResult >>= parseCompilationUnit
 
 getCommandLineOptions :: [String] -> ((Map.Map String String), [String])
 getCommandLineOptions args =
@@ -69,13 +70,13 @@ mergeMaps (Right es) (Right e) = do
     Nothing -> Right (Map.union es e)
     Just e -> Left e
 
-getAst :: IO(Either ParseError (Map.Map String Clazz2))
+getAst :: IO(Either ParseError (Map.Map QualifiedName Clazz2))
 getAst = do
   lexerResult <- tokenizeFromFile "./Test.java"
-  return $ lexerResult >>= parseClasses >>= parseClasses2
+  return $ lexerResult >>= parseCompilationUnit >>= parseClasses2
 
 displayTypeErrors :: [TypeError] -> IO ()
 displayTypeErrors errorList = mapM_ (putStrLn . show) errorList
 
 classError :: Clazz -> String -> ParseError
-classError (NewClazz pos _ _ _ _ _) str = newErrorMessage (Message str) pos
+classError (NewClazz pos _ _ _ _ _ _ _) str = newErrorMessage (Message str) pos

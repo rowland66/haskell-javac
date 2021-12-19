@@ -1,16 +1,15 @@
 module Lexer
     ( Token(..)
     , TokenPos
-    , tokenize
     , tokenizeFromFile
     ) where
 
 import Text.ParserCombinators.Parsec hiding (token, tokens)
+import Text.Parsec.Char (endOfLine)
 import Control.Applicative ((<*), (*>), (<$>), (<*>))
+import qualified Data.Text as T
 
-data Token = Ide String
-           | LBrack
-           | RBrack
+data Token = Ide T.Text
            | LBrace
            | RBrace
            | LParens
@@ -31,40 +30,41 @@ ide = do
     r   <- optionMaybe (many $ oneOf rest)
     spaces
     return $ flip (,) pos $ case r of
-                 Nothing -> Ide [fc]
-                 Just s  -> Ide $ [fc] ++ s
+                 Nothing -> Ide (T.pack [fc])
+                 Just s  -> Ide $ T.pack ([fc] ++ s)
   where firstChar = ['A'..'Z'] ++ ['a'..'z'] ++ "_"
         rest      = firstChar ++ ['0'..'9']
 
-parsePos :: Parser Token -> Parser TokenPos
-parsePos p = (,) <$> p <*> getPosition
+lbrace, rbrace, lparens, rparens, semi, dot, comma, operator:: Parser TokenPos
+lbrace = parseCharToken '{' LBrace
+rbrace = parseCharToken '}' RBrace
+lparens = parseCharToken '(' LParens
+rparens = parseCharToken ')' RParens
+semi = parseCharToken ';' Semi
+dot = parseCharToken '.' Dot
+comma = parseCharToken ',' Comma
+operator = parseCharToken '=' Assign
 
-lbrack, rbrack, lbrace, rbrace, lparens, rparens, semi, dot, comma :: Parser TokenPos
-lbrack = parsePos $ char '[' >> return LBrack
-rbrack = parsePos $ char ']' >> return RBrack
-lbrace = parsePos $ char '{' >> return LBrace
-rbrace = parsePos $ char '}' >> return RBrace
-lparens = parsePos $ char '(' >> return LParens
-rparens = parsePos $ char ')' >> return RParens
-semi = parsePos $ char ';' >> return Semi
-dot = parsePos $ char '.' >> return Dot
-comma = parsePos $ char ',' >> return Comma
+parseCharToken :: Char -> Token -> Parser TokenPos
+parseCharToken c t = do p <- getPosition; char c; return (t,p)
 
 keywords =
-  try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" <|> keyword "return")
+  try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" <|> keyword "return" <|> keyword "package" <|> keyword "import")
 
 keyword kw = do
+  p <- getPosition
   k <- try (do {k' <- string kw; notFollowedBy $ oneOf (['A'..'Z'] ++ ['a'..'z'] ++ "_" ++ ['0'..'9']); return k' })
-  parsePos $ return (Keyword k)
+  return (Keyword k,p)
 
-operator = parsePos $ char '=' >> return Assign
+comment = do
+  try (string "//")
+  c <- manyTill anyChar endOfLine
+  return c
 
 token :: Parser TokenPos
-token = choice
+token = (skipMany (comment >> (many space))) >> choice
     [ keywords
     , ide
-    , lbrack
-    , rbrack
     , lbrace
     , rbrace
     , lparens
@@ -77,9 +77,6 @@ token = choice
 
 tokens :: Parser [TokenPos]
 tokens = spaces *> many (token <* spaces)
-
-tokenize :: SourceName -> String -> Either ParseError [TokenPos]
-tokenize = runParser tokens ()
 
 tokenizeFromFile :: FilePath -> IO (Either ParseError [TokenPos])
 tokenizeFromFile fp = parseFromFile tokens fp

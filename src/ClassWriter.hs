@@ -6,14 +6,24 @@ import Data.Binary.Put
 import qualified Data.ByteString.Lazy as B
 import qualified Data.ByteString.Builder as BSB
 import Control.Monad.Trans.State
-import Parser2
 import TypeChecker
 import qualified ConstantPoolBuilder as CPB
 import ByteCodeBuilder
 import System.IO (openFile,hClose,IOMode(..))
+import System.Directory (createDirectoryIfMissing)
+import qualified Data.Text as T
 
 writeClass :: FilePath -> TypedClazz -> IO ()
-writeClass outputDirectory clazz@(NewTypedClazz name _ _ _ _) = do
-  handle <- openFile (outputDirectory++"/"++name++".class") WriteMode
+writeClass outputDirectory clazz@(NewTypedClazz qn _ _ _ _) = do
+  let (packageText,nameText) = deconstructQualifiedName qn
+  let packageDirectory = (if (null packageText) then "" else (sep++(T.unpack (pathFromTextList packageText))))
+  createDirectoryIfMissing True (outputDirectory++packageDirectory)
+  handle <- openFile (outputDirectory++packageDirectory++"/"++(T.unpack nameText)++".class") WriteMode
   B.hPut handle (buildClass clazz)
   hClose handle
+
+pathFromTextList packageText = (T.intercalate textSep packageText)
+
+textSep = T.pack "/"
+
+sep = "/"

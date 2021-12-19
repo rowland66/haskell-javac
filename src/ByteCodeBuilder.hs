@@ -15,6 +15,7 @@ import Data.List
 
 import ConstantPoolBuilder
 import Parser2
+import qualified Parser as P
 import TypeChecker
 import Debug.Trace
 
@@ -45,7 +46,7 @@ buildClass clazz =
 buildClass' :: TypedClazz -> ConstantPoolST ClassByteCode
 buildClass' clazz@(NewTypedClazz name extends fields constructors methods) = do
   clazzNdx <- addClass name
-  let parentCls = case extends of NewExtends _ parent -> parent; ExtendsObject -> "java/lang/Object"
+  let parentCls = case extends of NewExtends _ parent -> parent; ExtendsObject -> P.createQNameObject
   parentNdx <- addClass parentCls
   fieldsInfo <- sequence $ fmap (\f -> buildFieldInfo f) fields
   constructorsMethodInfo <- sequence $ fmap (\m -> buildConstructorMethodInfo parentCls m) constructors
@@ -57,22 +58,22 @@ classHeader = toLazyByteString (word32BE 0xCAFEBABE <> word16BE 0x0000 <> word16
 
 buildFieldInfo :: Field -> ConstantPoolST B.ByteString
 buildFieldInfo (NewField _ tp _ name) = do
-  nameNdx <- addUtf8 name
-  descriptorNdx <- addUtf8 ("L"++tp++";")
+  nameNdx <- addUtf8 (show name)
+  descriptorNdx <- addUtf8 ("L"++(show tp)++";")
   return $ toLazyByteString ((word16BE 0x0001) <> (word16BE nameNdx) <> (word16BE descriptorNdx) <> (word16BE 0x0000))
 
 buildMethodInfo :: TypedMethod -> ConstantPoolST B.ByteString
 buildMethodInfo method@(NewTypedMethod name params tp _) = do
-  let descriptor = "("++(foldr (\(NewParameter _ ptype _) d -> ("L"++ptype++";")++d) "" params)++")"++"L"++tp++";"
-  nameNdx <- addUtf8 name
+  let descriptor = "("++(foldr (\(NewParameter _ ptype _) d -> ("L"++(show ptype)++";")++d) "" params)++")"++"L"++(show tp)++";"
+  nameNdx <- addUtf8 (show name)
   descriptorNdx <- addUtf8 descriptor
   codeAttrInfo <- buildMethodCodeAttrInfo method
   return $ toLazyByteString ((word16BE 0x0001) <> (word16BE nameNdx) <> (word16BE descriptorNdx) <> (word16BE 0x0001) <> (lazyByteString codeAttrInfo))
 
-buildConstructorMethodInfo :: String -> TypedConstructor -> ConstantPoolST B.ByteString
+buildConstructorMethodInfo :: P.QualifiedName -> TypedConstructor -> ConstantPoolST B.ByteString
 buildConstructorMethodInfo parentCls constructor@(NewTypedConstructor params superInvocation assignments) = do
-  let descriptor = "("++(foldr (\(NewParameter _ ptype _) d -> ("L"++ptype++";")++d) "" params)++")"++"V"
-  nameNdx <- addUtf8 "<init>"
+  let descriptor = "("++(foldr (\(NewParameter _ ptype _) d -> ("L"++(show ptype)++";")++d) "" params)++")"++"V"
+  nameNdx <- addUtf8 (show P.createNameInit)
   descriptorNdx <- addUtf8 descriptor
   codeAttributeInfo <- (buildConstructorCodeAttrInfo (fromIntegral (length params) :: Word16) parentCls superInvocation assignments)
   return $ toLazyByteString (
@@ -85,14 +86,14 @@ buildConstructorMethodInfo parentCls constructor@(NewTypedConstructor params sup
 buildMethodCodeAttrInfo :: TypedMethod -> ConstantPoolST B.ByteString
 buildMethodCodeAttrInfo (NewTypedMethod _ params _ term) = do
   (codeBytes, maxStack) <- generateTermCode term
-  buildCodeAttrInfo maxStack (fromIntegral (length params) :: Word16) codeBytes
+  buildCodeAttrInfo maxStack (fromIntegral (length params) :: Word16) (toLazyByteString ((lazyByteString codeBytes) <> (word8 0xb0)))
 
-buildConstructorCodeAttrInfo :: Word16 -> String -> TypedConstructorInvocation -> [TypedAssignment] -> ConstantPoolST B.ByteString
+buildConstructorCodeAttrInfo :: Word16 -> P.QualifiedName -> TypedConstructorInvocation -> [TypedAssignment] -> ConstantPoolST B.ByteString
 buildConstructorCodeAttrInfo paramsCount parentCls (NewTypedConstructorInvocation superTerms) assignments = do
   (superInvocationCodeBytes, superInvocationMaxStack) <- generateSuperInvocation parentCls superTerms
   (assignmentCodeBytesList, assignmentMaxStack) <- foldM (\(list,ms) a -> (fmap (\(c, ms') -> (c:list, (max ms ms'))) (generateAssignmentCode a))) ([],0) assignments
-  let codeBytes = B.concat $ superInvocationCodeBytes : assignmentCodeBytesList
-  buildCodeAttrInfo (max superInvocationMaxStack assignmentMaxStack) paramsCount codeBytes
+  let codeBytes = B.concat $ superInvocationCodeBytes : (reverse assignmentCodeBytesList)
+  buildCodeAttrInfo (max superInvocationMaxStack assignmentMaxStack) paramsCount (toLazyByteString ((lazyByteString codeBytes) <> (word8 0xb1)))
 
 buildCodeAttrInfo :: Word16 -> Word16 -> B.ByteString -> ConstantPoolST B.ByteString
 buildCodeAttrInfo maxStack paramsCount codeBytes = do
@@ -131,7 +132,7 @@ generateTermCode' (TypedValue (TypedVariable {vPosition=p})) = do
 generateTermCode' (TypedValue (TypedObjectCreation {ocTyp=tp, ocTerms=terms})) = do
   classNdx <- addClass tp
   (constructorTerms, maxStack) <- (generateTermListCode terms)
-  constructorMethodRef <- (addMethodRef tp "<init>" (fmap getTypedTermType terms) "V")
+  constructorMethodRef <- (addMethodRef tp P.createNameInit (fmap getTypedTermType terms) "V")
   let byteCode = toLazyByteString (
                    (word8 0xbb) <> (word16BE classNdx) <>
                    (word8 0x59) <>
@@ -152,7 +153,7 @@ generateTermCode' (TypedApplication term (TypedFieldAccess {fName=name, fTyp=tp}
 generateTermCode' (TypedApplication term (TypedMethodInvocation {mName=name, mTyp=tp, mTerms=terms})) = do
   (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
   (methodInvocationTerms, argumentListMaxStack) <- (generateTermListCode terms)
-  methodRef <- (addMethodRef (getTypedTermType term) name (fmap getTypedTermType terms) tp)
+  methodRef <- (addMethodRef (getTypedTermType term) name (fmap getTypedTermType terms) (show tp))
   let byteCode = toLazyByteString ((lazyByteString methodInvocationTermByteCode) <>
                    (lazyByteString methodInvocationTerms) <>
                    (word8 0xb6) <>
@@ -171,10 +172,10 @@ generateTermListCode' b startStack maxStack (t:ts) = do
   (termByteCode, maxStack') <- generateTermCode' t
   generateTermListCode' (b <> (lazyByteString termByteCode)) (startStack+1) (max maxStack (maxStack' + startStack)) ts
 
-generateSuperInvocation :: String -> [TypedTerm] -> ConstantPoolST (B.ByteString, Word16)
+generateSuperInvocation :: P.QualifiedName -> [TypedTerm] -> ConstantPoolST (B.ByteString, Word16)
 generateSuperInvocation parentCls terms = do
   (invocationTerms, maxStack) <- (generateTermListCode terms)
-  methodRef <- addMethodRef parentCls "<init>" (fmap getTypedTermType terms) "V"
+  methodRef <- addMethodRef parentCls P.createNameInit (fmap getTypedTermType terms) "V"
   let byteCode = toLazyByteString (
                    (word8 0x2a) <>
                    (lazyByteString invocationTerms) <>

@@ -1,8 +1,10 @@
-class Pair extends Object {
+package org.rowland;
+
+class Pair extends java.lang.Object {
   A fst;
   java.lang.Object snd;
 
-  Pair(B fst, java.lang.Object snd) {
+  Pair(A fst, java.lang.Object snd) {
     this.fst=fst; this.snd=snd;
   }
 
@@ -11,23 +13,19 @@ class Pair extends Object {
   }
 
   A getSnd(A x, Pair r) {
-    return ((Pair) this.fst.test((C) x,r)).fst;
+    return ((Pair) this.fst.test((B) x,r)).fst;
   }
 
 }
 
 class B extends A {
-  java.lang.Object bar;
 
-  B() {
-    super(new C());
-    this.bar = new Pair(new B(), new A(new C()));
+  B(C param) {
+    super(param);
   }
-
-  Pair test() {
-    return new Pair(new B(), this.bar);
-  }
-
 }
 
-class C extends B { C() { super(); } }
+class C extends java.lang.Object {
+  C() {
+    super(); }
+  }
