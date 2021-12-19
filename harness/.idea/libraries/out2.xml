@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="out2">
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/../../haskell-javac/out2" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
