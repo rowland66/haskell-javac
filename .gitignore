@@ -2,3 +2,5 @@
 stack.yaml.lock
 out
 out2
+out3
+.vscode

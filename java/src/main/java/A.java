@@ -1,7 +1,7 @@
 package org.rowland;
 
-class A extends java.lang.Object {
-  java.lang.Object foo;
+class A extends Object {
+  Object foo;
   C bar;
 
   A(C initFoo) {

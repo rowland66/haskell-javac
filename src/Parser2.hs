@@ -6,7 +6,6 @@ module Parser2
   , Abstraction(..)
   , Value(..)
   , Term(..)
-  , DataType
   , Extends(..)
   , ConstructorInvocation(..)
   , Assignment(..)
@@ -18,19 +17,24 @@ module Parser2
   , Clazz2(..)
   , SourcePos'(..)
   , getClazz2Name
+  , LocalClasses
   ) where
 
+import TextShow
 import Data.Functor.Identity (Identity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import Data.List (intersperse)
+import Data.List (intercalate)
 import Text.Parsec.Prim
 import Text.Parsec.Combinator
 import Text.Parsec.Pos
 import Text.Parsec.Error
 import qualified Parser as P
 import Lexer
+    ( TokenPos,
+      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword) )
 import Debug.Trace
+import qualified Parser as P
 
 data Abstraction = FieldAccess SourcePos P.SimpleName
                  | MethodInvocation SourcePos P.SimpleName [Term]
@@ -49,7 +53,7 @@ getTermPosition (Value (ObjectCreation pos _ _)) = pos
 getTermPosition (Value (Cast pos _ _)) = pos
 getTermPosition (Application t _) = getTermPosition t
 
-type DataType = String;
+type LocalClasses = Map.Map P.QualifiedName Clazz2
 
 data SourcePos' = SourcePos' SourcePos | CompiledCode
 
@@ -69,97 +73,102 @@ data Constructor = NewConstructor SourcePos' [Parameter] Signature (Maybe Constr
 
 data Method = NewMethod SourcePos P.SimpleName [Parameter] P.QualifiedName Signature Term
 
-data Clazz2 = NewClazz2 SourcePos' P.QualifiedName Extends [Field] [Constructor] [Method]
+data Clazz2 = NewClazz2 SourcePos' P.CompilationUnit P.QualifiedName Extends [Field] [Constructor] [Method]
 
 {-- Parameters are equal if their types are equal. This is convenient in some cases, but might cause problems in others -}
 instance Eq Parameter where
-  (==) (NewParameter _ tp1 _) (NewParameter _ tp2 _) = (tp1 == tp2)
+  (==) (NewParameter _ tp1 _) (NewParameter _ tp2 _) = tp1 == tp2
 
 instance Show Signature where
-  show (Signature nm types) = (P.simpleNameToString nm) ++ "(" ++ (concat (intersperse "," (fmap show types))) ++ ")"
+  show (Signature nm types) = P.simpleNameToString nm ++ "(" ++ concatMap (\t -> "L"++show t++";") types ++ ")"
+
+instance TextShow Signature where
+  showb s = fromString (show s)
 
 instance Eq Signature where
-  (==) (Signature nm1 types1) (Signature nm2 types2) = (nm1 == nm2) && (types1 == types2)
+  (==) (Signature nm1 types1) (Signature nm2 types2) = nm1 == nm2 && types1 == types2
 
 instance Show Field where
-  show (NewField _ tp _ nm) = (show tp) ++ " " ++ (show nm) ++ ";"
+  show (NewField _ tp _ nm) = show tp ++ " " ++ show nm ++ ";"
 
 instance Show Constructor where
-  show (NewConstructor _ _ sig _ assignments) = (show sig)++"\n"++(foldr (\a str -> str++"\n"++(show a)) "" assignments)
+  show (NewConstructor _ _ sig _ assignments) = show sig++"\n"++foldr (\a str -> str++"\n"++show a) "" assignments
 
 instance Show Method where
-  show (NewMethod _ _ _ _ sig term) = (show sig)++"\n"++(show term)
+  show (NewMethod _ _ _ _ sig term) = show sig++"\n"++show term
 
 instance Show Extends where
-  show (NewExtends _ qName) = "extends " ++ (show qName)
-  show (ExtendsObject) = "extends /java/lang/Object"
+  show (NewExtends _ qName) = "extends " ++ show qName
+  show ExtendsObject = "extends /java/lang/Object"
 
 instance Show Clazz2 where
-  show (NewClazz2 _ nm extends fields constructors methods) =
-    "class " ++ (show nm) ++ " " ++ (show extends) ++ "\n" ++
-      (foldr (\f str -> (show f)++"\n"++str) "" fields) ++
-      foldr (\c str -> (show c)++"\n"++str) "" constructors
+  show (NewClazz2 _ _ nm extends fields constructors methods) =
+    "class " ++ show nm ++ " " ++ show extends ++ "\n" ++
+      foldr (\f str -> show f++"\n"++str) "" fields ++
+      foldr (\c str -> show c++"\n"++str) "" constructors
 
 getClazz2Name :: Clazz2 -> P.QualifiedName
-getClazz2Name (NewClazz2 _ nm _ _ _ _) = nm
+getClazz2Name (NewClazz2 _ _ nm _ _ _ _) = nm
 
-parseClasses2 :: [P.Clazz] -> (Either ParseError (Map.Map P.QualifiedName Clazz2))
+parseClasses2 :: [P.Clazz] -> Either ParseError (Map.Map P.QualifiedName Clazz2)
 parseClasses2 clazzList = do
-  clazzList <- sequence (fmap (\cls -> mapClazz cls) clazzList)
-  let pairsList = fmap (\cls@(NewClazz2 _ nm _ _ _ _) -> (nm, cls)) clazzList
-  trace "Parser2" $ return (Map.fromList pairsList)
+  let pairsList = fmap (\cls@(P.NewClazz _ _ nm _ _ _ _) -> (nm, cls)) clazzList
+  let clazzMap = Map.fromList pairsList
+  mapM (mapClazz clazzMap) clazzMap
 
-mapClazz :: P.Clazz -> Either ParseError Clazz2
-mapClazz (P.NewClazz pos package _ name maybeExtends fields constructors methods) = do
-  e <- case maybeExtends of Just tok -> (mapExtends package tok); Nothing -> Right ExtendsObject;
-  c <- sequence (fmap (mapConstructor package) constructors)
-  f <- sequence (fmap (mapField package) fields)
-  m <- sequence (fmap (mapMethod package) methods)
-  return (NewClazz2 (SourcePos' pos) name e f c m)
 
-mapExtends :: [T.Text] -> [TokenPos] -> Either ParseError Extends
-mapExtends package toks = runParser parseExtends (TermState {package=package, termStack=[]}) "" toks
+mapClazz :: Map.Map P.QualifiedName P.Clazz -> P.Clazz -> Either ParseError Clazz2
+mapClazz classMap (P.NewClazz pos cu@P.CompilationUnit {..} name maybeExtends fields constructors methods) = do
+  e <- case maybeExtends of Just tok -> mapExtends package classMap imports tok; Nothing -> Right ExtendsObject;
+  c <- mapM (mapConstructor package classMap imports) constructors
+  f <- mapM (mapField package classMap imports) fields
+  m <- mapM (mapMethod package classMap imports) methods
+  return (NewClazz2 (SourcePos' pos) cu name e f c m)
 
-mapField :: [T.Text] -> P.Field -> Either ParseError Field
-mapField package (P.NewField toks) = do
-  (tppos,tp,nmpos,nm) <- runParser parseField (TermState {package=package,termStack=[]}) "" toks
+mapExtends :: [T.Text] -> Map.Map P.QualifiedName P.Clazz -> P.NameToPackageMap -> [TokenPos] -> Either ParseError Extends
+mapExtends package classMap imports =
+  runParser parseExtends (TermState {termStack=[],..}) ""
+
+mapField :: [T.Text] -> Map.Map P.QualifiedName P.Clazz -> P.NameToPackageMap -> P.Field -> Either ParseError Field
+mapField package classMap imports (P.NewField toks) = do
+  (tppos,tp,nmpos,nm) <- runParser parseField (TermState {termStack=[],..}) "" toks
   return (NewField tppos tp nmpos nm)
 
-mapConstructor :: [T.Text] -> P.Constructor -> Either ParseError Constructor
-mapConstructor package (P.NewConstructor pos toks (P.NewBody bodyToks)) = do
-  params <- runParser parameter (TermState  {package=package, termStack=[]}) "" toks
-  (super, assignments) <- runParser constructorBody (TermState  {package=package, termStack=[]}) "" bodyToks
+mapConstructor :: [T.Text] -> Map.Map P.QualifiedName P.Clazz -> P.NameToPackageMap -> P.Constructor -> Either ParseError Constructor
+mapConstructor package classMap imports (P.NewConstructor pos toks (P.NewBody bodyToks)) = do
+  params <- runParser parameter (TermState  {termStack=[],..}) "" toks
+  (super, assignments) <- runParser constructorBody (TermState  {termStack=[],..}) "" bodyToks
   return (NewConstructor (SourcePos' pos) params (createSignature P.createNameInit params) super assignments)
 
-mapMethod :: [T.Text] -> P.Method -> Either ParseError Method
-mapMethod package (P.NewMethod tpTok nmTok paramsToks (P.NewBody bodyToks)) = do
-  toks <- runParser satisfyQualifiedName (TermState {package=package, termStack=[]}) "" tpTok
-  let (tp,_) = P.createQName package toks
+mapMethod :: [T.Text] -> Map.Map P.QualifiedName P.Clazz -> P.NameToPackageMap -> P.Method -> Either ParseError Method
+mapMethod package classMap imports (P.NewMethod tpTok nmTok paramsToks (P.NewBody bodyToks)) = do
+  toks <- runParser satisfyQualifiedName (TermState {termStack=[],..}) "" tpTok
+  let (tp,_) = P.createQName package classMap imports toks
   let (nm,pos) = P.createName nmTok
-  params <- runParser parameter (TermState {package=package, termStack=[]}) "" paramsToks
-  body <- runParser methodBody (TermState {package=package, termStack=[]}) "" bodyToks
+  params <- runParser parameter (TermState {termStack=[],..}) "" paramsToks
+  body <- runParser methodBody (TermState {termStack=[],..}) "" bodyToks
   return (NewMethod pos nm params tp (createSignature nm params) body)
 
 parseExtends :: (Stream s Identity TokenPos) => Parsec s TermState Extends
 parseExtends = do
   TermState {..} <- getState
   toks <- satisfyQualifiedName
-  let (qName,pos) = P.createQName package toks
-  return (if ((show qName) == "/java/lang/Object") then ExtendsObject else (NewExtends pos qName))
+  let (qName,pos) = P.createQName package classMap imports toks
+  return (if show qName == "/java/lang/Object" then ExtendsObject else NewExtends pos qName)
 
 parseField :: (Stream s Identity TokenPos) => Parsec s TermState (SourcePos, P.QualifiedName, SourcePos, P.SimpleName)
 parseField = do
   TermState {..} <- getState
   toks <- satisfyQualifiedName
-  let (tp, tppos) = P.createQName package toks
+  let (tp, tppos) = P.createQName package classMap imports toks
   tok <- P.satisfySimpleName
   let (nm,nmpos) = P.createName tok
-  trace ("field type: "++(show tp)) $ return (tppos,tp,nmpos,nm)
+  return (tppos,tp,nmpos,nm)
 
 createSignature :: P.SimpleName -> [Parameter] -> Signature
 createSignature nm params = Signature nm (fmap (\(NewParameter _ tp _) -> tp) params)
 
-constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState ((Maybe ConstructorInvocation), [Assignment])
+constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState (Maybe ConstructorInvocation, [Assignment])
 constructorBody = do
   maybeSuper <- optionMaybe (try constructorInvocation)
   assignments <- assignmentList
@@ -205,10 +214,10 @@ parameter = do
     Nothing -> do
       TermState {..} <- getState
       toks <- satisfyQualifiedName
-      let (tp,tppos) = P.createQName package toks
+      let (tp,tppos) = P.createQName package classMap imports toks
       tok <- P.satisfySimpleName
       let (name,nmpos) = P.createName tok
-      fmap ([(NewParameter tppos tp name)] ++) nextParameter
+      fmap ([NewParameter tppos tp name] ++) nextParameter
 
 nextParameter :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState [Parameter]
 nextParameter = do
@@ -228,10 +237,9 @@ assignment :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Assig
 assignment = do
   variable <- term
   P.satisfy Assign
-  value <- term
-  return (NewAssignment (getTermPosition variable) variable value)
+  NewAssignment (getTermPosition variable) variable <$> term
 
-data TermState = TermState {termStack :: [Term], package :: [T.Text]}
+data TermState = TermState {termStack :: [Term], package :: [T.Text], classMap :: Map.Map P.QualifiedName P.Clazz, imports :: P.NameToPackageMap }
 
 term :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 term = do
@@ -249,16 +257,15 @@ term = do
           putState (TermState {..})
           return parensTerm
         Nothing -> do
-          term <- (try objectCreationTerm <|> try variableThis <|> try fieldAccessTerm <|> try methodInvocationTerm)
-          return term
+          try objectCreationTerm <|> try variableThis <|> try fieldAccessTerm <|> try methodInvocationTerm
       (terminator, _) <- lookAhead anyToken
       case terminator of
           Dot -> do
             TermState {termStack=termStack',..} <- getState
             P.satisfy Dot
-            putState (TermState {termStack=(term':termStack'),..})
+            putState (TermState {termStack=term':termStack',..})
             term
-          _ -> (return term')
+          _ -> return term'
 
 termFromStack :: [Term] -> Term
 termFromStack (t:ts) =
@@ -271,7 +278,7 @@ objectCreationTerm = do
   TermState {..} <- getState
   satisfyKeyword "new"
   toks <- satisfyQualifiedName
-  let (clazz,pos) = P.createQName package toks
+  let (clazz,pos) = P.createQName package classMap imports toks
   P.satisfy LParens
   arguments <- argumentList
   P.satisfy RParens
@@ -323,22 +330,21 @@ castTerm = do
   TermState {..} <- getState
   pos <- P.satisfy LParens
   toks <- satisfyQualifiedName
-  let (clazz,_) = P.createQName package toks
+  let (clazz,_) = P.createQName package classMap imports toks
   P.satisfy RParens
-  term <- term
-  return (Value (Cast pos clazz term))
+  Value . Cast pos clazz <$> term
 
 expressionTerminator :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState SourcePos
 expressionTerminator = P.satisfy Dot <|> P.satisfy Comma <|> P.satisfy Semi <|> P.satisfy RParens <|> P.satisfy Assign
 
 satisfyIde :: (Stream s Identity (Token, SourcePos)) => Parsec s u (T.Text, SourcePos)
-satisfyIde = token (\(tok, pos) -> (show tok))
-                  (\(tok, pos) -> pos)
+satisfyIde = token (\(tok, pos) -> show tok)
+                  (snd)
                   (\(tok, pos) -> case tok of Ide s -> Just (s,pos); _ -> Nothing)
 
 satisfyKeyword :: (Stream s Identity (Token, SourcePos)) => String -> Parsec s u SourcePos
-satisfyKeyword k = token (\(tok, pos) -> (show tok))
-                         (\(tok, pos) -> pos)
+satisfyKeyword k = token (\(tok, pos) -> show tok)
+                         (snd)
                          (\(tok, pos) -> case tok of Keyword n -> if n == k then Just pos else Nothing; _ -> Nothing)
 
 satisfyQualifiedName :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]

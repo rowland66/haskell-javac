@@ -15,5 +15,5 @@ executable javac
   hs-source-dirs:      src
   main-is:             Main.hs
   default-language:    Haskell2010
-  other-modules:       Lexer Parser Parser2 TypeChecker Environment ClassWriter ConstantPoolBuilder ByteCodeBuilder
-  build-depends:       base, parsec, containers, transformers, Glob, binary, bytestring, text, directory
+  other-modules:       Compiler Lexer Parser Parser2 TypeChecker Environment ClassWriter ConstantPoolBuilder ByteCodeBuilder ClassPath TypeInfo
+  build-depends:       base, parsec, containers, transformers, Glob, binary, bytestring, text, directory, vector, split, filepattern, text-show, extra, tuple

@@ -18,6 +18,7 @@ data Token = Ide T.Text
            | Dot
            | Comma
            | Assign
+           | Asterick
            | Keyword String
     deriving (Show, Eq)
 
@@ -35,7 +36,7 @@ ide = do
   where firstChar = ['A'..'Z'] ++ ['a'..'z'] ++ "_"
         rest      = firstChar ++ ['0'..'9']
 
-lbrace, rbrace, lparens, rparens, semi, dot, comma, operator:: Parser TokenPos
+lbrace, rbrace, lparens, rparens, semi, dot, comma, operator, asterick:: Parser TokenPos
 lbrace = parseCharToken '{' LBrace
 rbrace = parseCharToken '}' RBrace
 lparens = parseCharToken '(' LParens
@@ -44,6 +45,7 @@ semi = parseCharToken ';' Semi
 dot = parseCharToken '.' Dot
 comma = parseCharToken ',' Comma
 operator = parseCharToken '=' Assign
+asterick = parseCharToken '*' Asterick
 
 parseCharToken :: Char -> Token -> Parser TokenPos
 parseCharToken c t = do p <- getPosition; char c; return (t,p)
@@ -58,8 +60,7 @@ keyword kw = do
 
 comment = do
   try (string "//")
-  c <- manyTill anyChar endOfLine
-  return c
+  manyTill anyChar endOfLine
 
 token :: Parser TokenPos
 token = (skipMany (comment >> (many space))) >> choice
@@ -72,6 +73,7 @@ token = (skipMany (comment >> (many space))) >> choice
     , semi
     , dot
     , comma
+    , asterick
     , operator
     ]
 
