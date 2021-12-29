@@ -12,6 +12,7 @@ import Control.Monad (foldM)
 import Data.Int
 import Data.Word
 import Data.List
+import qualified Data.Text as T
 
 import ConstantPoolBuilder
 import Parser2
@@ -120,6 +121,7 @@ generateAssignmentCode' (TypedApplication t (TypedFieldAccess {fName=field, fTyp
   fieldRef <- (addFieldRef (getTypedTermType t) field tp)
   let byteCode = toLazyByteString $ (lazyByteString lhByteCode) <> (lazyByteString rhByteCode) <> (word8 0xb5) <> (word16BE fieldRef)
   return (byteCode, (max lhMaxStack (rhMaxStack+1)))
+generateAssignmentCode' _ _ = undefined
 
 generateTermCode :: TypedTerm -> ConstantPoolST (B.ByteString, Word16)
 generateTermCode term = do
@@ -129,6 +131,24 @@ generateTermCode term = do
 generateTermCode' :: TypedTerm -> ConstantPoolST (B.ByteString, Word16)
 generateTermCode' (TypedValue (TypedVariable {vPosition=p})) = do
   return $ ((generateLoadReference p), 1)
+generateTermCode' (TypedValue (TypedIntegerLiteral {iTyp=tp, iValue=value})) = do
+  intNdx <- addInteger value
+  methodRef <- addMethodRef' tp (P.constructSimpleName (T.pack "valueOf")) "(I)Ljava/lang/Integer;" "java/lang/Integer:valueOf(I)" (show tp)
+  let byteCode = toLazyByteString (
+                   (word8 0x13) <> (word16BE intNdx) <>  -- ldc_w Integer Constant
+                   (word8 0xb8) <> (word16BE methodRef)) -- invokestatic MethodRef
+  return (byteCode, 1)
+generateTermCode' (TypedValue (TypedStringLiteral {sTyp=tp, sValue=value})) = do
+  strNdx <- addString value
+  let byteCode = toLazyByteString (
+                   (word8 0x13) <> (word16BE strNdx)) -- ldc_w String Constant
+  return (byteCode, 1)
+generateTermCode' (TypedValue (TypedBooleanLiteral {bTyp=tp, bValue=value})) = do
+  methodRef <- addMethodRef' tp (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)" (show tp)
+  let byteCode = toLazyByteString (
+                   (if value then (word8 0x04) else (word8 0x03)) <> -- iconst_1 (true) or iconst_0 (false) 
+                   (word8 0xb8) <> (word16BE methodRef))                           -- invokestatic MethodRef
+  return (byteCode, 1)
 generateTermCode' (TypedValue (TypedObjectCreation {ocTyp=tp, ocTerms=terms})) = do
   classNdx <- addClass tp
   (constructorTerms, maxStack) <- (generateTermListCode terms)
@@ -161,7 +181,7 @@ generateTermCode' (TypedApplication term (TypedMethodInvocation {mName=name, mTy
   return (byteCode, (max termMaxStack (argumentListMaxStack+1)))
 
 generateTermListCode :: [TypedTerm] -> ConstantPoolST (B.ByteString, Word16)
-generateTermListCode terms = generateTermListCode' mempty 0 0 terms
+generateTermListCode = generateTermListCode' mempty 0 0
 
 {--We use to Word16 values to track the maximum stack required to evaluate the term list. As we move through the
    list, we add a value to the startStack because every term on the list leaves a value on the stack. We also track

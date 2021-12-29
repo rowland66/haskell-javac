@@ -37,6 +37,7 @@ import Text.ParserCombinators.Parsec (SourcePos)
 import Debug.Trace
 import qualified Data.Sequence.Internal.Sorting as P
 import Data.Maybe (mapMaybe)
+import Data.Int (Int32)
 
 type ClassData = (ClassPath,LocalClasses)
 
@@ -45,6 +46,9 @@ data TypedAbstraction = TypedFieldAccess {fName :: P.SimpleName, fTyp :: P.Quali
                       deriving Show
 
 data TypedValue = TypedVariable {vPosition :: Word8, vTyp :: P.QualifiedName}
+                | TypedIntegerLiteral {iValue :: Int32, iTyp :: P.QualifiedName}
+                | TypedStringLiteral {sValue :: String, sTyp :: P.QualifiedName}
+                | TypedBooleanLiteral {bValue :: Bool, bTyp :: P.QualifiedName}
                 | TypedObjectCreation {ocTyp :: P.QualifiedName,  ocTerms :: [TypedTerm]}
                 | TypedCast {cTyp :: P.QualifiedName,  cTerm :: TypedTerm}
                 deriving Show
@@ -68,6 +72,9 @@ instance Show TypeError where
 
 getTypedTermType :: TypedTerm -> P.QualifiedName
 getTypedTermType (TypedValue TypedVariable {vTyp=tp}) = tp
+getTypedTermType (TypedValue TypedIntegerLiteral {iTyp=tp}) = tp
+getTypedTermType (TypedValue TypedStringLiteral {sTyp=tp}) = tp
+getTypedTermType (TypedValue TypedBooleanLiteral {bTyp=tp}) = tp
 getTypedTermType (TypedValue TypedObjectCreation {ocTyp=tp}) = tp
 getTypedTermType (TypedValue TypedCast {cTyp=tp}) = tp
 getTypedTermType (TypedApplication _ TypedFieldAccess {fTyp=tp}) = tp
@@ -125,6 +132,12 @@ getType :: Term -> ReaderT (Environment, ClassData) IO (Either [TypeError] Typed
 getType (Value (Variable pos x)) = do
   (env, typeData) <- ask
   return $ case env !? x of Just (tp,ndx) -> Right (TypedValue (TypedVariable {vPosition=fromIntegral ndx :: Word8,vTyp=tp})); Nothing -> Left [TypeError ("Undefined variable: "++show x) pos]
+getType (Value (Integer pos v)) = do
+  return $ Right (TypedValue (TypedIntegerLiteral {iValue=v, iTyp=P.createQNameInteger}))
+getType (Value (String pos s)) = do
+  return $ Right (TypedValue (TypedStringLiteral {sValue=s, sTyp=P.createQNameString}))
+getType (Value (Boolean pos b)) = do
+  return $ Right (TypedValue (TypedBooleanLiteral {bValue=b, bTyp=P.createQNameBoolean}))
 getType (Value (ObjectCreation pos tp params)) = do
   (env, typeData) <- ask
   eitherCreateClass <- lift $ TI.getClassTypeInfo typeData tp
@@ -323,7 +336,6 @@ getTermDeclaredTypeErrors :: Term -> ReaderT ClassData IO [TypeError]
 getTermDeclaredTypeErrors t = do
   typeData <- ask
   case t of
-    (Value (Variable _ _)) -> return []
     (Value (ObjectCreation pos tp params)) -> liftM2 (++) paramErrors classError
       where
         classError = lift $ do cond <- TI.isValidClass typeData tp; return $ [TypeError ("Undefined type: "++show tp) pos | not cond]
@@ -337,6 +349,7 @@ getTermDeclaredTypeErrors t = do
       where
         termErrors = getTermDeclaredTypeErrors t'
         paramErrors = foldM (\errs t'' -> fmap (++ errs) (getTermDeclaredTypeErrors t'')) [] params
+    _ -> return []
 
 getClassInheritenceCycleErrors :: Clazz2 -> ReaderT ClassData IO [TypeError]
 getClassInheritenceCycleErrors clazz = getClassInheritenceCycleErrors' clazz []

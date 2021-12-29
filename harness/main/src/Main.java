@@ -1,12 +1,10 @@
 import org.rowland.*;
-import java.lang.String;
 
 class Main {
+
     public static void main(String[] args) {
-        Object o = new Object();
-        A t = new A(new C());
-        t.foo = "Hello";
-        t.bar = new C();
-        System.out.println(t.foo + t.toString());
+        A a = new A(new C());
+        System.out.println(a.getStr());
+        System.out.println(a.addString(" Long"));
     }
 }

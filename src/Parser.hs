@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
+
 
 
 {-- Parse a stream of tokens into a Map of Clazz's. Each Clazz has Fields, Constructors and Methods, that contain  -}
@@ -14,6 +14,9 @@ module Parser
   , createNameInit
   , simpleNameToString
   , createQNameObject
+  , createQNameInteger
+  , createQNameString
+  , createQNameBoolean
   , deconstructQualifiedName
   , constructQualifiedName
   , constructSimpleName
@@ -181,7 +184,7 @@ parameterList = do
 
 constructorDeclaration :: (Stream s Identity (Token, SourcePos)) => T.Text -> Parsec s u ClazzMember
 constructorDeclaration className = do
-  pos <- token (\(tok, pos) -> show tok) (snd) (\(tok, pos) -> case tok of (Ide className) -> Just pos; _ -> Nothing)
+  pos <- token (\(tok, pos) -> show tok) snd (\(tok, pos) -> case tok of (Ide className) -> Just pos; _ -> Nothing)
   params <- parameterList
   ConstructorMember . NewConstructor pos params <$> methodBody
 
@@ -217,9 +220,9 @@ clazzDeclaration = do
   rest <- manyTill anyToken eof
   let newClazz = NewClazz
                    pos cu (QualifiedName package clazz) maybeSuperClazz
-                   (fmap extractField $ filter (\m -> case m of (FieldMember _) -> True; (_) -> False) clazzMembers)
-                   (fmap extractConstructor $ filter (\m -> case m of (ConstructorMember _) -> True; (_) -> False) clazzMembers)
-                   (fmap extractMethod $ filter (\m -> case m of (MethodMember _) -> True; (_) -> False) clazzMembers)
+                   (extractField <$> filter (\m -> case m of (FieldMember _) -> True; (_) -> False) clazzMembers)
+                   (extractConstructor <$> filter (\m -> case m of (ConstructorMember _) -> True; (_) -> False) clazzMembers)
+                   (extractMethod <$> filter (\m -> case m of (MethodMember _) -> True; (_) -> False) clazzMembers)
                    where extractField (FieldMember f) = f
                          extractConstructor (ConstructorMember c) = c
                          extractMethod (MethodMember m) = m
@@ -232,17 +235,17 @@ satisfy t = token (\(tok, pos) -> show tok)
 
 satisfyKeyword :: (Stream s Identity (Token, SourcePos)) => String -> Parsec s u SourcePos
 satisfyKeyword k = token (\(tok, pos) -> show tok)
-                         (snd)
+                         snd
                          (\(tok, pos) -> case tok of Keyword k' -> if k == k' then Just pos else Nothing; _ -> Nothing)
 
 satisfySimpleNameText :: (Stream s Identity (Token, SourcePos)) => Parsec s u (T.Text, SourcePos)
 satisfySimpleNameText = token (\(tok, pos) -> show tok)
-                         (snd)
+                         snd
                          (\(tok, pos) -> case tok of Ide s -> Just (s,pos); _ -> Nothing)
 
 satisfySimpleName :: (Stream s Identity (Token, SourcePos)) => Parsec s u TokenPos
 satisfySimpleName = token (\(tok, pos) -> show tok)
-                          (snd)
+                          snd
                           (\(tok, pos) -> case tok of Ide _ -> Just (tok,pos); _ -> Nothing)
 
 satisfyQualifiedName :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
@@ -307,7 +310,13 @@ createQName package classMap imports toks =
 
 simpleNameToString (SimpleName name) = T.unpack name
 
-createQNameObject = QualifiedName ([(T.pack "java"), (T.pack "lang")]) (SimpleName (T.pack "Object"))
+createQNameObject = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Object"))
+
+createQNameInteger = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Integer"))
+
+createQNameString = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "String"))
+
+createQNameBoolean = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Boolean"))
 
 deconstructQualifiedName :: QualifiedName -> ([T.Text], T.Text)
 deconstructQualifiedName (QualifiedName p (SimpleName n)) = (p,n)

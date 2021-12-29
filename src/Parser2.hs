@@ -25,6 +25,7 @@ import Data.Functor.Identity (Identity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.List (intercalate)
+import Data.Int (Int32)
 import Text.Parsec.Prim
 import Text.Parsec.Combinator
 import Text.Parsec.Pos
@@ -32,23 +33,28 @@ import Text.Parsec.Error
 import qualified Parser as P
 import Lexer
     ( TokenPos,
-      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword) )
+      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword, IntegerLiteral, StringLiteral, BooleanLiteral) )
 import Debug.Trace
-import qualified Parser as P
 
 data Abstraction = FieldAccess SourcePos P.SimpleName
                  | MethodInvocation SourcePos P.SimpleName [Term]
                  deriving Show
 
 data Value = Variable SourcePos P.SimpleName
-          | ObjectCreation SourcePos P.QualifiedName [Term]
-          | Cast SourcePos P.QualifiedName Term
-          deriving Show
+           | Integer SourcePos Int32
+           | String SourcePos String
+           | Boolean SourcePos Bool
+           | ObjectCreation SourcePos P.QualifiedName [Term]
+           | Cast SourcePos P.QualifiedName Term
+           deriving Show
 
 data Term = Value Value | Application Term Abstraction deriving Show
 
 getTermPosition :: Term -> SourcePos
 getTermPosition (Value (Variable pos _)) = pos
+getTermPosition (Value (Integer pos _)) = pos
+getTermPosition (Value (String pos _)) = pos
+getTermPosition (Value (Boolean pos _)) = pos
 getTermPosition (Value (ObjectCreation pos _ _)) = pos
 getTermPosition (Value (Cast pos _ _)) = pos
 getTermPosition (Application t _) = getTermPosition t
@@ -257,7 +263,13 @@ term = do
           putState (TermState {..})
           return parensTerm
         Nothing -> do
-          try objectCreationTerm <|> try variableThis <|> try fieldAccessTerm <|> try methodInvocationTerm
+          try integerLiteralTerm <|> 
+              try stringLiteralTerm <|> 
+              try booleanLiteralTerm <|> 
+              try objectCreationTerm <|> 
+              try variableThis <|> 
+              try fieldAccessTerm <|> 
+              try methodInvocationTerm
       (terminator, _) <- lookAhead anyToken
       case terminator of
           Dot -> do
@@ -267,11 +279,20 @@ term = do
             term
           _ -> return term'
 
-termFromStack :: [Term] -> Term
-termFromStack (t:ts) =
-  case t of
-    Value v -> Value v
-    Application t a -> Application t a
+integerLiteralTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
+integerLiteralTerm = do
+  (value,pos) <- satisfyIntegerLiteral
+  return (Value (Integer pos value))
+
+stringLiteralTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
+stringLiteralTerm = do
+  (value,pos) <- satisfyStringLiteral
+  return (Value (String pos value))
+
+booleanLiteralTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
+booleanLiteralTerm = do
+  (value,pos) <- satisfyBooleanLiteral
+  return (Value (Boolean pos value))
 
 objectCreationTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 objectCreationTerm = do
@@ -346,6 +367,21 @@ satisfyKeyword :: (Stream s Identity (Token, SourcePos)) => String -> Parsec s u
 satisfyKeyword k = token (\(tok, pos) -> show tok)
                          (snd)
                          (\(tok, pos) -> case tok of Keyword n -> if n == k then Just pos else Nothing; _ -> Nothing)
+
+satisfyIntegerLiteral :: (Stream s Identity (Token, SourcePos)) => Parsec s u (Int32, SourcePos)
+satisfyIntegerLiteral = token (\(tok, pos) -> show tok)
+                        (snd)
+                        (\(tok, pos) -> case tok of IntegerLiteral n -> Just (n, pos); _ -> Nothing)
+
+satisfyStringLiteral :: (Stream s Identity (Token, SourcePos)) => Parsec s u (String, SourcePos)
+satisfyStringLiteral = token (\(tok, pos) -> show tok)
+                        (snd)
+                        (\(tok, pos) -> case tok of StringLiteral s -> Just (s, pos); _ -> Nothing)
+
+satisfyBooleanLiteral :: (Stream s Identity (Token, SourcePos)) => Parsec s u (Bool, SourcePos)
+satisfyBooleanLiteral = token (\(tok, pos) -> show tok)
+                        (snd)
+                        (\(tok, pos) -> case tok of BooleanLiteral b -> Just (b, pos); _ -> Nothing)
 
 satisfyQualifiedName :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
 satisfyQualifiedName = do

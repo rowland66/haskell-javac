@@ -16,13 +16,14 @@ import qualified Data.Text as T
 writeClass :: FilePath -> TypedClazz -> IO ()
 writeClass outputDirectory clazz@(NewTypedClazz qn _ _ _ _) = do
   let (packageText,nameText) = deconstructQualifiedName qn
-  let packageDirectory = (if (null packageText) then "" else (sep++(T.unpack (pathFromTextList packageText))))
+  let packageDirectory = (if null packageText then "" else sep++T.unpack (pathFromTextList packageText))
   createDirectoryIfMissing True (outputDirectory++packageDirectory)
-  handle <- openFile (outputDirectory++packageDirectory++"/"++(T.unpack nameText)++".class") WriteMode
+  handle <- openFile (outputDirectory++packageDirectory++"/"++T.unpack nameText++".class") WriteMode
   B.hPut handle (buildClass clazz)
   hClose handle
 
-pathFromTextList packageText = (T.intercalate textSep packageText)
+pathFromTextList :: [T.Text] -> T.Text
+pathFromTextList = T.intercalate textSep
 
 textSep = T.pack "/"
 

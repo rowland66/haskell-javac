@@ -18,6 +18,7 @@ module ClassPath
 , getClass
 , hasClass
 , getPackageClasses
+, main
 ) where
 
 import qualified Data.Map as Map
@@ -431,7 +432,7 @@ mapFilePathToQualifiedName fp =
 main :: IO ()
 main = do
   classPath <- createClassPath "out2:out3/classes"
-  maybecf <- getClass classPath (T.pack "java/lang/String")
+  maybecf <- getClass classPath (T.pack "java/lang/Integer")
   case maybecf of
     Just cf -> print cf
     Nothing -> putStrLn "Error"
