@@ -14,7 +14,7 @@ import System.Directory (createDirectoryIfMissing)
 import qualified Data.Text as T
 
 writeClass :: FilePath -> TypedClazz -> IO ()
-writeClass outputDirectory clazz@(NewTypedClazz qn _ _ _ _) = do
+writeClass outputDirectory clazz@(NewTypedClazz qn _ _ _) = do
   let (packageText,nameText) = deconstructQualifiedName qn
   let packageDirectory = (if null packageText then "" else sep++T.unpack (pathFromTextList packageText))
   createDirectoryIfMissing True (outputDirectory++packageDirectory)

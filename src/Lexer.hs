@@ -9,6 +9,7 @@ import Text.Parsec.Char (endOfLine)
 import Control.Applicative ((<*), (*>), (<$>), (<*>))
 import qualified Data.Text as T
 import Data.Int (Int32)
+import Debug.Trace (trace, traceShow)
 
 data Token = Ide T.Text
            | LBrace
@@ -99,6 +100,17 @@ asterick = parseCharToken '*' Asterick
 parseCharToken :: Char -> Token -> Parser TokenPos
 parseCharToken c t = do p <- getPosition; char c; return (t,p)
 
+comments =
+  try multiLineComment <|> try singleLineComment
+
+multiLineComment = do
+  string "/**"
+  manyTill anyChar (try (string "*/"))
+
+singleLineComment = do
+  string "//"
+  manyTill anyChar (try endOfLine) 
+
 keywords =
   try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" <|> keyword "return" <|> keyword "package" <|> keyword "import")
 
@@ -110,12 +122,8 @@ keyword kw = do
 literal =
   try decimalNumeral <|> quotedString <|> boolean
 
-comment = do
-  try (string "//")
-  manyTill anyChar endOfLine
-
 token :: Parser TokenPos
-token = skipMany (comment >> many space) >> choice
+token = skipMany (comments >> spaces) >> choice
     [ keywords
     , literal
     , ide

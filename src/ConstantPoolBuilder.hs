@@ -22,15 +22,16 @@ import Data.Word
 import Data.Bits (shiftL,(.|.))
 import Debug.Trace
 import qualified Parser as P
+import qualified Parser2 as P2
 import Data.Int (Int32)
 
 data ConstantPool = ConstantPool { pool :: [B.ByteString]
                                  , size :: Word16
-                                 , utf8Map :: (Map.Map String Word16)
-                                 , classMap :: (Map.Map P.QualifiedName Word16)
-                                 , fieldRefMap :: (Map.Map String Word16)
-                                 , methodRefMap :: (Map.Map String Word16)
-                                 , nameAndTypeMap :: (Map.Map Word32 Word16)
+                                 , utf8Map :: Map.Map String Word16
+                                 , classMap :: Map.Map P.QualifiedName Word16
+                                 , fieldRefMap :: Map.Map String Word16
+                                 , methodRefMap :: Map.Map String Word16
+                                 , nameAndTypeMap :: Map.Map Word32 Word16
                                  }
 
 type ConstantPoolST = StateT ConstantPool Identity
@@ -51,15 +52,15 @@ getCount ConstantPool{size=s} = s+1
 
 toBytes :: ConstantPool -> B.ByteString
 toBytes ConstantPool{pool=p} =
-  foldl (\bs bss -> mappend bss bs) B.empty p
+  foldl (flip mappend) B.empty p
 
 addUtf8 :: String -> ConstantPoolST Word16
 addUtf8 str = do
   cp@ConstantPool{pool=p,size=s,utf8Map=umap} <- get
-  if (Map.member str umap) then
+  if Map.member str umap then
     return (umap Map.! str)
   else do
-    put $ cp {pool=((createUtf8ByteString str):p), size=s+1, utf8Map=(Map.insert str (s+1) umap)}
+    put $ cp {pool=createUtf8ByteString str:p, size=s+1, utf8Map=Map.insert str (s+1) umap}
     return (s+1)
 
 addClass :: P.QualifiedName -> ConstantPoolST Word16
@@ -73,36 +74,36 @@ addClass name = do
       cp {pool=((createClassByteString classNameStringNdx):p), size=s+1, classMap=(Map.insert name (s+1) cmap)})
     fmap (\ConstantPool{size=s} -> s) get
 
-addFieldRef :: P.QualifiedName -> P.SimpleName -> P.QualifiedName -> ConstantPoolST Word16
+addFieldRef :: P.QualifiedName -> P.SimpleName -> P2.Type -> ConstantPoolST Word16
 addFieldRef className name tp = do
   ConstantPool{fieldRefMap=frmap} <- get
-  let key = ((show className)++":"++(show name))
-  if (Map.member key frmap) then
+  let key = show className++":"++show name
+  if Map.member key frmap then
     return (frmap Map.! key)
   else do
-    let descriptor = "L"++(show tp)++";"
+    let descriptor = show tp
     classNdx <- addClass className
-    nameAndTypeNdx <- (addNameAndType (show name) descriptor)
+    nameAndTypeNdx <- addNameAndType (show name) descriptor
     modify (\cp@ConstantPool{pool=p,size=s} ->
-      cp {pool=((createFieldRefByteString classNdx nameAndTypeNdx):p), size=s+1, fieldRefMap=(Map.insert key (s+1) frmap)})
+      cp {pool=createFieldRefByteString classNdx nameAndTypeNdx:p, size=s+1, fieldRefMap=Map.insert key (s+1) frmap})
     fmap (\ConstantPool{size=s} -> s) get
 
-addMethodRef :: P.QualifiedName -> P.SimpleName -> [P.QualifiedName] -> String -> ConstantPoolST Word16
+addMethodRef :: P.QualifiedName -> P.SimpleName -> [P2.Type] -> String -> ConstantPoolST Word16
 addMethodRef className name params tp = do
-  let key = ((show className)++":"++(show name)++":"++(foldr (\p ps -> (show p)++ps) [] params))
-  let descriptor = "("++(foldr (\p d -> ("L"++(show p)++";")++d) "" params)++")"++(if (tp=="V") then tp else ("L"++tp++";"))
-  addMethodRef' className name descriptor key tp
+  let key = show className++":"++show name++":"++foldr (\p ps -> show p++ps) [] params
+  let descriptor = "("++foldr (\p d -> show p++d) "" params++")"++tp
+  addMethodRef' className name descriptor key
 
-addMethodRef' :: P.QualifiedName -> P.SimpleName -> String -> String -> String -> ConstantPoolST Word16
-addMethodRef' className name descriptor mapKey tp = do
+addMethodRef' :: P.QualifiedName -> P.SimpleName -> String -> String -> ConstantPoolST Word16
+addMethodRef' className name descriptor mapKey = do
   ConstantPool{methodRefMap=mrmap} <- get
   if Map.member mapKey mrmap then
     return (mrmap Map.! mapKey)
   else do
     classNdx <- addClass className
-    nameAndTypeNdx <- (addNameAndType (show name) descriptor)
+    nameAndTypeNdx <- addNameAndType (show name) descriptor
     modify (\cp@ConstantPool{pool=p,size=s} ->
-      cp {pool=((createMethodRefByteString classNdx nameAndTypeNdx):p), size=s+1, methodRefMap=(Map.insert mapKey (s+1) mrmap)})
+      cp {pool=createMethodRefByteString classNdx nameAndTypeNdx:p, size=s+1, methodRefMap=Map.insert mapKey (s+1) mrmap})
     fmap (\ConstantPool{size=s} -> s) get
 
 addNameAndType :: String -> String -> ConstantPoolST Word16
@@ -110,8 +111,8 @@ addNameAndType name descriptor = do
   cp@ConstantPool{nameAndTypeMap=natmap} <- get
   nameNdx <- addUtf8 name
   typeNdx <- addUtf8 descriptor
-  let key = (shiftL (fromIntegral nameNdx :: Word32) 16) .|. (fromIntegral typeNdx :: Word32)
-  if (Map.member key natmap) then
+  let key = shiftL (fromIntegral nameNdx :: Word32) 16 .|. (fromIntegral typeNdx :: Word32)
+  if Map.member key natmap then
     return (natmap Map.! key)
   else do
     modify (\cp@ConstantPool{pool=p, size=s} ->
@@ -149,5 +150,5 @@ createNameAndTypeByteString nameNdx typeNdx = toLazyByteString (mappend (word8 0
 createIntegerByteString :: Word32 -> B.ByteString
 createIntegerByteString value = toLazyByteString (mappend (word8 0x03) (word32BE value))
 
-createStringByteString :: Word16 -> B.ByteString 
+createStringByteString :: Word16 -> B.ByteString
 createStringByteString constantNdx = toLazyByteString (mappend (word8 0x08) (word16BE constantNdx))

@@ -4,6 +4,7 @@ module Compiler (
 
 import qualified Data.Map.Strict as Map
 import Control.Monad (foldM,forM_)
+import Control.Monad.Trans.State.Strict ( StateT(runStateT) )
 import Text.Parsec.Error (newErrorMessage, Message(Message))
 import Lexer
 import Parser
@@ -40,17 +41,13 @@ compile' optionMap cp defaultNameMapping srcFiles = do
     Left e -> print e
     Right ast -> do
       print "Type Checking..."
-      typeCheckResult <- typeCheck (cp,ast)
-      case typeCheckResult of
-        Just errorList -> displayTypeErrors errorList >> print ast
-        Nothing -> do
-          eTypedClazzes <- transform (cp, ast)
-          case eTypedClazzes of
-            Left errorList -> displayTypeErrors errorList >> print ast
-            Right typedClazzes -> do
-              print "Writing Classes..."
-              forM_ typedClazzes (writeClass (optionMap Map.! "-d"))
-              print "Complete"
+      (eTypedClazzes, typeData) <- runStateT (typeCheck >> transform) (cp,ast)
+      case eTypedClazzes of
+        Left errorList -> displayTypeErrors errorList >> print ast
+        Right typedClazzes -> do
+          print "Writing Classes..."
+          forM_ typedClazzes (writeClass (optionMap Map.! "-d"))
+          print "Complete"
 
 lexAndParse :: OptionMap -> NameToPackageMap -> FilePath -> IO (Either ParseError [Clazz])
 lexAndParse optionMap defaultNameToPackageMap file = do

@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LambdaCase #-}
 
 
 
@@ -18,6 +19,7 @@ module Parser
   , createQNameString
   , createQNameBoolean
   , deconstructQualifiedName
+  , deconstructSimpleName
   , constructQualifiedName
   , constructSimpleName
   , Clazz(NewClazz)
@@ -157,8 +159,6 @@ mapImportToNamePackagePairs cp (TypeImportOnDemand pos package) =
     Nothing -> Left $ newErrorMessage (Message "Unkown package") pos
     Just txts -> Right (fmap (\nm -> (nm, package)) txts)
 
-
-
 clazzClause :: (Stream s Identity (Token, SourcePos)) => Parsec s u (SimpleName, SourcePos)
 clazzClause = do
   satisfyKeyword "class"
@@ -220,9 +220,9 @@ clazzDeclaration = do
   rest <- manyTill anyToken eof
   let newClazz = NewClazz
                    pos cu (QualifiedName package clazz) maybeSuperClazz
-                   (extractField <$> filter (\m -> case m of (FieldMember _) -> True; (_) -> False) clazzMembers)
-                   (extractConstructor <$> filter (\m -> case m of (ConstructorMember _) -> True; (_) -> False) clazzMembers)
-                   (extractMethod <$> filter (\m -> case m of (MethodMember _) -> True; (_) -> False) clazzMembers)
+                   (extractField <$> filter (\case (FieldMember _) -> True; _ -> False) clazzMembers)
+                   (extractConstructor <$> filter (\case (ConstructorMember _) -> True; _ -> False) clazzMembers)
+                   (extractMethod <$> filter (\case (MethodMember _) -> True; (_) -> False) clazzMembers)
                    where extractField (FieldMember f) = f
                          extractConstructor (ConstructorMember c) = c
                          extractMethod (MethodMember m) = m
@@ -288,6 +288,8 @@ createNameThis = SimpleName (T.pack "this")
 
 createNameInit = SimpleName (T.pack "<init>")
 
+{-- Create a qualified name from a list of tokens. If the list of tokens has only 1 token, apply the package and lookup
+    the token name in the imports -}
 createQName :: [T.Text] -> Map.Map QualifiedName Clazz -> NameToPackageMap -> [TokenPos] -> (QualifiedName, SourcePos)
 createQName package classMap imports [(tok,pos)]
   | Map.member qn classMap =
@@ -317,6 +319,9 @@ createQNameInteger = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T
 createQNameString = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "String"))
 
 createQNameBoolean = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Boolean"))
+
+deconstructSimpleName :: SimpleName -> T.Text
+deconstructSimpleName (SimpleName n) = n
 
 deconstructQualifiedName :: QualifiedName -> ([T.Text], T.Text)
 deconstructQualifiedName (QualifiedName p (SimpleName n)) = (p,n)

@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="featherjava-lib">
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/../featherjava-lib/out/production/featherjava-lib" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

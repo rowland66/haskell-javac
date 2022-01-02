@@ -1,19 +1,59 @@
-name:                javac
-version:             0.1.0.0
--- synopsis:
--- description:
-homepage:            https://github.com/rowland66/javac#readme
-license:             BSD3
-author:              Rowland Smith
-maintainer:          rowls66@gmail.com
-copyright:           Rowland Smith 2020
-category:            none
-build-type:          Simple
-cabal-version:       >=1.10
+cabal-version: 1.12
 
-executable javac
-  hs-source-dirs:      src
-  main-is:             Main.hs
-  default-language:    Haskell2010
-  other-modules:       Compiler Lexer Parser Parser2 TypeChecker Environment ClassWriter ConstantPoolBuilder ByteCodeBuilder ClassPath TypeInfo
-  build-depends:       base, parsec, containers, transformers, Glob, binary, bytestring, text, directory, vector, split, filepattern, text-show, extra, tuple
+-- This file has been generated from package.yaml by hpack version 0.34.4.
+--
+-- see: https://github.com/sol/hpack
+
+name:           javac
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/githubuser/rowland-shapes#readme>
+homepage:       https://github.com/rowland66/haskell-javac#readme
+bug-reports:    https://github.com/rowland66/haskell-javac/issues
+author:         Rowland Smith
+maintainer:     rowls66@gmail.com
+copyright:      2022 Rowland Smith
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+
+source-repository head
+  type: git
+  location: https://github.com/rowland66/haskell-javac
+
+executable javac-exe
+  main-is: Main.hs
+  other-modules:
+      ByteCodeBuilder
+      ClassPath
+      ClassWriter
+      Compiler
+      ConstantPoolBuilder
+      Environment
+      Lexer
+      Parser
+      Parser2
+      TypeChecker
+      TypeInfo
+      Paths_javac
+  hs-source-dirs:
+      src
+  build-depends:
+      Glob
+    , base >=4.7 && <5
+    , binary
+    , bytestring
+    , containers
+    , directory
+    , extra
+    , filepattern
+    , monadlist
+    , parsec
+    , split
+    , text
+    , text-show
+    , transformers
+    , tuple
+    , vector
+  default-language: Haskell2010

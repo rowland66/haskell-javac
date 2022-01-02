@@ -21,7 +21,7 @@ module ClassPath
 , main
 ) where
 
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import Data.Vector (Vector)
 import qualified Data.Vector as V hiding (Vector)
 import System.IO (IOMode(..),Handle, withBinaryFile)
@@ -37,11 +37,13 @@ import System.FilePattern.Directory (getDirectoryFiles)
 import Control.Monad (foldM)
 import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.Trans.State.Strict as ST
-import Debug.Trace ()
+import TextShow ( TextShow(showt) )
+import Debug.Trace (trace, traceStack)
+import Control.Monad.Trans.State.Strict (StateT,get,put,evalStateT)
 
 type ClassReferenceMap = Map.Map T.Text ClassReference
 
-type PackageMap = Map.Map T.Text ClassReferenceMap
+type PackageMap = Map.Map T.Text ClassReferenceMap -- Mapping from qualified name to the class bytes reference
 
 data ClassPath = ClassPath { directories :: [T.Text]
                            , jars :: [T.Text]
@@ -51,20 +53,20 @@ data ClassPath = ClassPath { directories :: [T.Text]
 
 data ClassReference = DirectoryReference T.Text | JarReference T.Text deriving (Show)
 
-data ClassDescriptor = ClassDescriptor { name :: T.Text
-                                       , parent :: T.Text
-                                       , fields :: [Field]
-                                       , methods :: [Method]
+data ClassDescriptor = ClassDescriptor { name :: !T.Text
+                                       , parent :: !T.Text
+                                       , fields :: ![Field]
+                                       , methods :: ![Method]
                                        }
 
-data Field = Field { fname :: T.Text
-                   , ftype :: T.Text
-                   , faccess_flags :: Word16
+data Field = Field { fname :: !T.Text
+                   , ftype :: !T.Text
+                   , faccess_flags :: !Word16
                    }
 
-data Method = Method { mname :: T.Text
-                     , mdescriptor :: T.Text
-                     , maccess_flags :: Word16
+data Method = Method { mname :: !T.Text
+                     , mdescriptor :: !T.Text
+                     , maccess_flags :: !Word16
                      }
 
 data ClassFile = ClassFile { minor_version :: !Word16
@@ -162,12 +164,12 @@ instance Show Method where
 readClassFile :: ClassReference -> T.Text -> IO (Maybe ClassFile)
 readClassFile (DirectoryReference directory) name = do
   let fp = directory <> sep <> name <> T.pack ".class"
-  withBinaryFile (T.unpack fp) ReadMode readClassFile'
+  withBinaryFile (T.unpack fp) ReadMode (readClassFile' (T.unpack fp))
 readClassFile (JarReference jar) name =
   return Nothing
 
-readClassFile' :: Handle -> IO (Maybe ClassFile)
-readClassFile' handle = do
+readClassFile' :: FilePath -> Handle -> IO (Maybe ClassFile)
+readClassFile' fp handle = do
   magic <- B.hGet handle 4
   if magicByteString == B.unpack magic then do
     minor <- B.hGet handle 2
@@ -346,8 +348,9 @@ createClassDescriptor :: ClassFile -> ClassDescriptor
 createClassDescriptor classFile =
   let classInfo = getClassFromConstantPool classFile (this_class classFile)
       name = getUtf8FromConstantPool classFile (ci_name_index classInfo)
-      parentClassInfo = getClassFromConstantPool classFile (super_class classFile)
-      parent = getUtf8FromConstantPool classFile (ci_name_index parentClassInfo)
+      parent = if super_class classFile > 0 
+        then getUtf8FromConstantPool classFile (ci_name_index (getClassFromConstantPool classFile (super_class classFile)))
+        else T.pack "" -- Only java/lang/Object should get here 
       fields = foldl (\list f -> mapField classFile f:list) [] (fields_info classFile)
       methods = foldl (\list m -> mapMethod classFile m:list) [] (methods_info classFile) in
   ClassDescriptor {..}
@@ -368,25 +371,34 @@ mapMethod classFile mi =
   in
     Method {..}
 
-getClass :: ClassPath -> T.Text -> IO (Maybe ClassDescriptor)
-getClass cp qualifiedName = do
-  let maybeClass = classMap cp Map.!? qualifiedName
+getClass :: T.Text -> StateT ClassPath IO (Maybe ClassDescriptor)
+getClass qualifiedName = do
+  cp@ClassPath {..} <- get
+  let maybeClass = classMap Map.!? qualifiedName
   case maybeClass of
     Just clazz -> return (Just clazz)
     Nothing -> do
       let (package,clazz) = T.breakOnEnd sep qualifiedName
-      let maybePackage = referenceMap cp Map.!? package
+      let maybePackage = referenceMap Map.!? package
       let maybeRef = maybePackage >>= (Map.!? clazz)
       case maybeRef of
         Nothing -> return Nothing
         Just ref -> do
-          classFile <- readClassFile ref qualifiedName
-          return $ fmap createClassDescriptor classFile
+          maybeClassFile <- lift $ readClassFile ref qualifiedName
+          case maybeClassFile of
+            Nothing -> return Nothing
+            Just classFile -> do
+              let newClassDescriptor = createClassDescriptor classFile
+              put ClassPath {classMap=Map.insert qualifiedName newClassDescriptor classMap,..}
+              return $ Just newClassDescriptor
 
-hasClass :: ClassPath -> T.Text -> IO Bool
-hasClass cp qualifiedName = do
+hasClass :: ClassPath -> T.Text -> Bool
+hasClass cp qualifiedName =
   let (package,clazz) = T.breakOnEnd sep qualifiedName
-  return $ Map.member package (referenceMap cp)
+      maybeSubMap = if T.length package > 0 then referenceMap cp Map.!? package else Nothing
+      maybeRef = fmap (Map.!? clazz) maybeSubMap
+  in
+    case maybeRef of Just _ -> True; Nothing -> False
 
 getPackageClasses :: ClassPath -> [T.Text] -> Maybe [T.Text]
 getPackageClasses cp package =
@@ -432,7 +444,7 @@ mapFilePathToQualifiedName fp =
 main :: IO ()
 main = do
   classPath <- createClassPath "out2:out3/classes"
-  maybecf <- getClass classPath (T.pack "java/lang/Integer")
+  maybecf <- evalStateT (getClass (T.pack "java/lang/Number")) classPath
   case maybecf of
     Just cf -> print cf
     Nothing -> putStrLn "Error"
