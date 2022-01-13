@@ -18,12 +18,15 @@ module TypeChecker
   , TypedClazz(..)
   , getTypedTermType
   , P.deconstructQualifiedName
+  , TypeName
   ) where
 
 import Control.Monad.Trans.State.Strict (StateT,get,put,evalStateT)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT, ask)
 import Control.Monad (join,foldM,liftM,liftM2)
 import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except ( ExceptT, runExceptT, throwE )
+import Control.Monad.Extra (ifM)
 import Control.Applicative ( Alternative((<|>)) )
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -43,27 +46,35 @@ import qualified Data.Sequence.Internal.Sorting as P
 import Data.Maybe (mapMaybe)
 import Data.Int (Int32)
 import Parser2
+import qualified Parser2 as P2
+import TypeInfo (getUnboxedType)
+import qualified Parser as P
+import qualified Parser2 as P2
+import qualified Parser2 as P2
 
 type ClassData = (ClassPath,LocalClasses)
 
-data TypedAbstraction = TypedFieldAccess {fName :: P.SimpleName, fTyp :: Type}
-                      | TypedMethodInvocation {mName :: P.SimpleName, mTyp :: Type, mParamTyps :: [Type], mTerms :: [TypedTerm]}
+data TypedAbstraction = TypedFieldAccess {fName :: P.SimpleName, fTyp :: TI.Type}
+                      | TypedMethodInvocation {mName :: P.SimpleName, mTyp :: TI.Type, mParamTyps :: [TI.Type], mTerms :: [TypedTerm]}
                       deriving Show
 
-data TypedValue = TypedVariable {vPosition :: Word8, vTyp :: Type}
-                | TypedTypeName {tnTyp :: P.QualifiedName  }
-                | TypedIntegerLiteral {iValue :: Int32, iTyp :: P.QualifiedName }
-                | TypedStringLiteral {sValue :: String, sTyp :: P.QualifiedName}
-                | TypedBooleanLiteral {bValue :: Bool, bTyp :: P.QualifiedName}
-                | TypedObjectCreation {ocTyp :: P.QualifiedName, ocParamTyps :: [Type], ocTerms :: [TypedTerm]}
-                | TypedCast {cTyp :: P.QualifiedName,  cTerm :: TypedTerm}
+data TypedValue = TypedVariable {vPosition :: Word8, vTyp :: TI.Type}
+                | TypedIntegerLiteral {iValue :: Int32 }
+                | TypedStringLiteral {sValue :: String }
+                | TypedBooleanLiteral {bValue :: Bool }
+                | TypedObjectCreation {ocTyp :: P.QualifiedName, ocParamTyps :: [TI.Type], ocTerms :: [TypedTerm]}
                 deriving Show
 
-data TypedTerm = TypedValue TypedValue | TypedApplication TypedReferenceTerm TypedAbstraction deriving Show
+data TypedTerm = TypedValue TypedValue
+               | TypedApplication TypedReferenceTerm TypedAbstraction
+               | TypedStaticApplication TypeName TypedAbstraction
+               | TypedCast TypedReferenceTerm
+               | TypedConditional TypedTerm TypedTerm TypedTerm TI.Type
+               deriving Show
 
 data TypedReferenceTerm = TypedReferenceTerm P.QualifiedName TypedTerm deriving Show
 
-data TypedConstructorInvocation = NewTypedConstructorInvocation P.QualifiedName [Type] [TypedTerm] deriving Show
+data TypedConstructorInvocation = NewTypedConstructorInvocation P.QualifiedName [TI.Type] [TypedTerm] deriving Show
 
 data TypedAssignment = NewTypedAssignment TypedTerm TypedTerm deriving Show
 
@@ -73,21 +84,20 @@ data TypedClazz = NewTypedClazz P.QualifiedName Extends [Field] [TypedMethod]
 
 data TypedMethodImplementation = TypedMethodImpl TypedTerm | TypedConstructorImpl TypedConstructorInvocation [TypedAssignment] deriving Show
 
-data TypeError = TypeError String SourcePos
+init' = T.pack "<init>"
 
-instance Show TypeError where
-  show (TypeError str pos) = str ++ "\nat: " ++ show pos
-
-getTypedTermType :: TypedTerm -> Type
+getTypedTermType :: TypedTerm -> TI.Type
 getTypedTermType (TypedValue TypedVariable {vTyp=tp}) = tp
-getTypedTermType (TypedValue TypedTypeName {tnTyp=tp}) = L tp
-getTypedTermType (TypedValue TypedIntegerLiteral {iTyp=tp}) = L tp
-getTypedTermType (TypedValue TypedStringLiteral {sTyp=tp}) = L tp
-getTypedTermType (TypedValue TypedBooleanLiteral {bTyp=tp}) = L tp
-getTypedTermType (TypedValue TypedObjectCreation {ocTyp=tp}) = L tp
-getTypedTermType (TypedValue TypedCast {cTyp=tp}) = L tp
+getTypedTermType (TypedValue TypedIntegerLiteral {}) = TI.L P.createQNameInteger P2.CompiledCode
+getTypedTermType (TypedValue TypedStringLiteral {}) = TI.L P.createQNameString P2.CompiledCode
+getTypedTermType (TypedValue TypedBooleanLiteral {}) = TI.L P.createQNameBoolean P2.CompiledCode
+getTypedTermType (TypedValue TypedObjectCreation {ocTyp=tp}) = TI.L tp CompiledCode
 getTypedTermType (TypedApplication _ TypedFieldAccess {fTyp=tp}) = tp
 getTypedTermType (TypedApplication _ TypedMethodInvocation {mTyp=tp}) = tp
+getTypedTermType (TypedStaticApplication _ TypedFieldAccess {fTyp=tp}) = tp
+getTypedTermType (TypedStaticApplication _ TypedMethodInvocation {mTyp=tp}) = tp
+getTypedTermType (TypedCast (TypedReferenceTerm tp _)) = TI.L tp CompiledCode
+getTypedTermType (TypedConditional _ _ _ t) = t
 
 typeCheck :: StateT ClassData IO (Maybe [TypeError])
 typeCheck =
@@ -96,7 +106,7 @@ typeCheck =
 transform :: StateT ClassData IO (Either [TypeError] [TypedClazz])
 transform = do
   typeData@(_,classMap) <- get
-  clazzList <- foldM (\list cls -> (list ++) <$> fmap (: []) (getTypedClazz cls)) [] classMap
+  clazzList <- foldM (\list cls -> (list ++) <$> fmap (: []) (runExceptT (getTypedClazz cls))) [] classMap
   let (typeErrors, typedClazzs) = Either.partitionEithers clazzList
   if not (null typeErrors)
     then return $ Left (concat typeErrors)
@@ -117,7 +127,7 @@ checkForDeclaredTypeErrors  = do
               (\l -> (l ++) <$> getFieldDeclaredTypeErrors cls) >>=
               (\l -> (l ++) <$> getMethodsDeclaredTypeErrors cls) ) [] classMap
   case errors of
-    [] -> return Nothing 
+    [] -> return Nothing
     _ -> return (Just errors)
 
 checkForClassInheritenceCycles :: StateT ClassData IO (Maybe [TypeError])
@@ -134,100 +144,104 @@ checkForErrors getErrorsFunction = do
     [] -> Nothing
     _ -> Just errors
 
-getType :: Term -> ReaderT Environment (StateT ClassData IO) (Either [TypeError] TypedTerm)
+getType :: Term -> ReaderT Environment (ExceptT [TypeError] (StateT ClassData IO)) TypedTerm
 getType (Value (Variable pos x)) = do
   env <- ask
-  return $ case env !? x of Just (tp,ndx) -> Right (TypedValue (TypedVariable {vPosition=fromIntegral ndx :: Word8,vTyp=tp})); Nothing -> Left [TypeError ("Undefined variable: "++show x) pos]
-getType (Value (TypeName pos tp)) = do
-  env <- ask
-  return $ Right (TypedValue (TypedTypeName {tnTyp=tp}))
+  case env !? x of Just (tp,ndx) -> return $ TypedValue (TypedVariable {vPosition=fromIntegral ndx :: Word8,vTyp=tp}); Nothing -> lift $ throwE [TypeError ("Undefined variable: "++show x) (SourcePos' pos)]
 getType (Value (IntegerLit pos v)) = do
-  return $ Right (TypedValue (TypedIntegerLiteral {iValue=v, iTyp=P.createQNameInteger}))
+  return $ TypedValue (TypedIntegerLiteral {iValue=v})
 getType (Value (StringLit pos s)) = do
-  return $ Right (TypedValue (TypedStringLiteral {sValue=s, sTyp=P.createQNameString}))
+  return $ TypedValue (TypedStringLiteral {sValue=s})
 getType (Value (BooleanLit pos b)) = do
-  return $ Right (TypedValue (TypedBooleanLiteral {bValue=b, bTyp=P.createQNameBoolean}))
-getType (Value (ObjectCreation pos tp params)) = do
-  typeData <- lift get
-  eitherCreateClass <- lift $ TI.getClassTypeInfo tp
-  case eitherCreateClass of
-    Left _ -> return (Left [TypeError ("Undefined type: "++show tp) pos])
-    Right createClass -> do
-      eitherParamTypes <- mapM getType params
-      if null (Either.lefts eitherParamTypes) then do
-        let paramTerms = Either.rights eitherParamTypes
-        let signature = Signature P.createNameInit (fmap getTypedTermType paramTerms)
-        maybeMethodInvocationExists <- lift $ TI.getMethodType createClass signature
-        case maybeMethodInvocationExists of
-          Nothing -> return (Left [TypeError ("Undefined constructor: "++show tp++"."++show signature) pos])
-          Just (NewMethodInvocation _ (Signature _ targetParamTypes)) -> do
-            return (Right (TypedValue (TypedObjectCreation {ocTyp=tp, ocParamTyps=targetParamTypes,ocTerms=paramTerms})))
-      else return $ Left (concat (Either.lefts eitherParamTypes))
-getType (Value (Cast pos tp t)) = do
-  typeData <- lift get
-  eitherTypedTerm <- getType t
-  case eitherTypedTerm of
-    Left _ -> return eitherTypedTerm
-    Right typedTerm -> do
-      eitherTermTypeInfo <- lift $ TI.getClassTypeInfo (TI.getBoxedType (getTypedTermType typedTerm))
-      eitherCastTypeInfo <- lift $ TI.getClassTypeInfo tp
-      isSubtype <- lift $TI.isSubtypeOf eitherCastTypeInfo eitherTermTypeInfo
-      case isSubtype of
-        Left txt -> return $ Left [TypeError ("Undefined type: "++T.unpack txt) pos]
-        Right b -> if b
-          then return $ Right (TypedValue (TypedCast {cTyp=tp, cTerm=typedTerm}))
-          else return $ Left [TypeError ("Invalid cast: "++show tp) pos]
+  return $ TypedValue (TypedBooleanLiteral {bValue=b})
+getType (Value (ObjectCreation pos (TypeName tpos tp) params)) = do
+  typeData <- lift $ lift get
+  createClass <- lift $ TI.getClassTypeInfoE (tp,SourcePos' tpos)
+  paramTerms <- mapM getType params
+  let signature = TI.ClassPathSignature init' (fmap getTypedTermType paramTerms)
+  maybeMethodInvocationExists <- lift $ TI.getMethodType createClass signature
+  case maybeMethodInvocationExists of
+    Nothing -> lift $ throwE [TypeError ("No matching constructor: "++show tp++"."++show signature) (SourcePos' pos)]
+    Just (TI.NewMethodInvocation _ (TI.ClassPathSignature _ targetParamTypes)) -> do
+      return (TypedValue (TypedObjectCreation {ocTyp=tp, ocParamTyps=targetParamTypes,ocTerms=paramTerms}))
+getType (Cast (TypeName pos tp) t) = do
+  typeData <- lift $ lift get
+  typedTerm <- getType t
+  let typedTermType = getTypedTermType typedTerm
+  termTypeInfo <- lift $ TI.getClassTypeInfoE (TI.getBoxedType (getTypedTermType typedTerm))
+  castTypeInfo <- lift $ TI.getClassTypeInfoE (tp, SourcePos' pos)
+  isSubtype <- lift $ TI.isSubtypeOf' castTypeInfo termTypeInfo
+  if isSubtype
+    then return (TypedCast (TypedReferenceTerm tp typedTerm))
+    else lift $ throwE [TypeError ("Invalid cast: "++show tp) (SourcePos' pos)]
 getType (Application t (FieldAccess pos nm)) = do
-  typeData <- lift get
-  eitherTypedTerm <- getType t
-  case eitherTypedTerm of
-    Left _ -> return eitherTypedTerm
-    Right typedTerm -> do
-      case getTypedTermType typedTerm of
-        I -> return $ Left [TypeError "int cannot be dereferenced" pos]
-        Z -> return $ Left [TypeError "boolean cannot be dereferenced" pos]
-        L termTypeName -> do
-          eitherTermType <- lift $ TI.getClassTypeInfo termTypeName
-          case eitherTermType of
-            Left txt -> return $ Left [TypeError ("Undefined type: "++T.unpack txt) pos]
-            Right termType -> do
-              maybeFieldType <- getFieldType nm termType
-              case maybeFieldType of
-                Nothing -> return $ Left [TypeError ("Undefined field: "++show nm) pos]
-                Just tp -> return $ Right (TypedApplication (TypedReferenceTerm termTypeName typedTerm) (TypedFieldAccess {fName=nm,fTyp=tp}))
-        Unsupported tp -> return $ Left [TypeError "unsupported primitive type cannot be dereferenced" pos]
-
+  typeData <- lift $ lift get
+  typedTerm <- getType t
+  case getTypedTermType typedTerm of
+    TI.I _-> lift $ throwE [TypeError "int cannot be dereferenced" (SourcePos' pos)]
+    TI.Z _-> lift $ throwE [TypeError "boolean cannot be dereferenced" (SourcePos' pos)]
+    TI.L termTypeName pos -> do
+      termType <- lift $ TI.getClassTypeInfoE (termTypeName,pos)
+      maybeFieldType <- lift $ getFieldType nm termType
+      case maybeFieldType of
+        Nothing -> lift $ throwE [TypeError ("Undefined field: "++show nm) pos]
+        Just tp -> return (TypedApplication (TypedReferenceTerm termTypeName typedTerm) (TypedFieldAccess {fName=nm,fTyp=tp}))
+    TI.UnsupportedType pos -> lift $ throwE [TypeError "unsupported primitive type cannot be dereferenced" pos]
 getType (Application t (MethodInvocation pos nm params)) = do
-  typeData <- lift get
-  eitherTypedTerm <- getType t
-  eitherParamTypes <- mapM getType params
-  if null (Either.lefts eitherParamTypes) then do
-    let paramTypedTerms = Either.rights eitherParamTypes
-    let signature = Signature nm (fmap getTypedTermType paramTypedTerms)
-    case eitherTypedTerm of
-      Left _ -> return eitherTypedTerm
-      Right typedTerm ->
-        case getTypedTermType typedTerm of
-          I -> return $ Left [TypeError "int cannot be dereferenced" pos]
-          Z -> return $ Left [TypeError "boolean cannot be dereferenced" pos]
-          L termTypeName -> do
-            eitherTermType <- lift $ TI.getClassTypeInfo termTypeName
-            case eitherTermType of
-              Left txt -> return $ Left [TypeError ("Undefined type: "++T.unpack txt) pos]
-              Right termType -> do
-                maybeMethodType <- if isStaticContext typedTerm
-                  then getStaticMethodType signature termType
-                  else getMethodType signature termType
-                case maybeMethodType of
-                  Nothing -> return (Left [TypeError ("Undefined method: "++show termTypeName++":"++show signature) pos])
-                  Just (NewMethodInvocation targetType (Signature _ targetParamTypes)) -> return
-                    (Right (TypedApplication
-                      (TypedReferenceTerm termTypeName typedTerm)
-                      (TypedMethodInvocation {mName=nm,mTyp=targetType,mParamTyps=targetParamTypes,mTerms=paramTypedTerms})))
-          Unsupported tp -> return $ Left [TypeError "unsupported primitive type cannot be dereferenced" pos]
-  else return $ Left (concat (Either.lefts eitherParamTypes))
+  typedTerm <- getType t
+  paramTerms <- mapM getType params
+  let signature = TI.ClassPathSignature (P.deconstructSimpleName nm) (fmap getTypedTermType paramTerms)
+  case getTypedTermType typedTerm of
+    TI.I _-> lift $ throwE [TypeError "int cannot be dereferenced" (SourcePos' pos)]
+    TI.Z _-> lift $ throwE [TypeError "boolean cannot be dereferenced" (SourcePos' pos)]
+    TI.L termTypeName pos-> do
+      termType <- lift $ TI.getClassTypeInfoE (termTypeName,pos)
+      maybeMethodType <- lift $ getMethodType signature termType
+      case maybeMethodType of
+        Nothing -> lift $ throwE [TypeError ("Undefined method: "++show termTypeName++":"++show signature) pos]
+        Just (TI.NewMethodInvocation targetType (TI.ClassPathSignature _ targetParamTypes)) -> return
+          (TypedApplication
+            (TypedReferenceTerm termTypeName typedTerm)
+            (TypedMethodInvocation {mName=nm,mTyp=targetType,mParamTyps=targetParamTypes,mTerms=paramTerms}))
+    TI.UnsupportedType pos -> lift $ throwE [TypeError "unsupported primitive type cannot be dereferenced" pos]
+getType (StaticApplication tn@(TypeName tnPos tnQn) (FieldAccess pos nm)) = do
+    typeNameTypeInfo <- lift $ TI.getClassTypeInfoE (tnQn,SourcePos' tnPos)
+    maybeFieldType <- lift $ getFieldType nm typeNameTypeInfo
+    case maybeFieldType of
+      Nothing -> lift $ throwE [TypeError ("Undefined static field: "++show tnQn++":"++show nm) (SourcePos' pos)]
+      Just tp -> return (TypedStaticApplication tn (TypedFieldAccess {fName=nm,fTyp=tp}))
+getType (StaticApplication tn@(TypeName tnPos tnQn) (MethodInvocation pos nm params)) = do
+  paramTypedTerms <- mapM getType params
+  let signature = TI.ClassPathSignature (P.deconstructSimpleName nm) (fmap getTypedTermType paramTypedTerms)
+  typeNameTypeInfo <- lift $ TI.getClassTypeInfoE (tnQn,SourcePos' tnPos)
+  maybeMethodInvocation <- lift $ TI.getStaticMethodType typeNameTypeInfo signature
+  case maybeMethodInvocation of
+    Nothing -> lift $ throwE [TypeError ("Undefined static method: "++show tnQn++":"++show signature) (SourcePos' pos)]
+    Just (TI.NewMethodInvocation targetType (TI.ClassPathSignature _ targetParamTypes)) -> return
+      (TypedStaticApplication
+        tn (TypedMethodInvocation {mName=nm,mTyp=targetType,mParamTyps=targetParamTypes,mTerms=paramTypedTerms}))
+getType (Conditional b1 t1 t2) = do
+  booleanExpr <- getType b1
+  term1 <- getType t1
+  term2 <- getType t2
+  if not (TI.isTypeBoolean (TI.getUnboxedType (getTypedTermType booleanExpr)))
+    then lift $ throwE [TypeError "First term in conditional is not boolean" (SourcePos' (P2.getTermPosition b1))]
+    else do
+      case (getTypedTermType term1, getTypedTermType term2) of
+        (tp@(TI.L qn1 _),TI.L qn2 _) | qn1 == qn2 -> return $ TypedConditional booleanExpr term1 term2 tp
+        (t1, t2) | TI.isTypeBoolean (getUnboxedType t1)
+                && TI.isTypeBoolean (getUnboxedType t2) ->
+                   return $ TypedConditional booleanExpr term1 term2 (TI.Z CompiledCode)
+        (t1, t2) | TI.isTypeInteger (getUnboxedType t1)
+                && TI.isTypeInteger (getUnboxedType t2) ->
+                   return $ TypedConditional booleanExpr term1 term2 (TI.I CompiledCode)
+        (t1, t2) -> do
+          lub <- lift $ leastUpperBound [fst (TI.getBoxedType t1), fst (TI.getBoxedType t2)]
+          return $ TypedConditional booleanExpr term1 term2 lub
+        {--_ -> lift $ throwE [TypeError "Second and third terms in conditional are different types" (SourcePos' (P2.getTermPosition t2))]--}
 
-getFieldType :: P.SimpleName -> TI.TypeInfo -> ReaderT Environment (StateT ClassData IO) (Maybe Type)
+
+getFieldType :: P.SimpleName -> TI.TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) (Maybe TI.Type)
 getFieldType nm tp = do
   typeData <- lift get
   let maybeFieldType = TI.getFieldType tp nm
@@ -236,46 +250,32 @@ getFieldType nm tp = do
     Nothing ->
       let parentName = TI.getTypeParent tp
       in
-        if parentName == P.createQNameObject
+        if fst parentName == P.createQNameObject
           then return Nothing
           else do
-            eitherParentType <- lift $ TI.getClassTypeInfo parentName
-            case eitherParentType of
-              Left txt -> undefined -- This should never happen
-              Right parentType -> getFieldType nm parentType
+            parentType <- TI.getClassTypeInfoE parentName
+            getFieldType nm parentType
 
-getMethodType :: Signature -> TI.TypeInfo -> ReaderT Environment (StateT ClassData IO) (Maybe MethodInvocation)
+getMethodType :: TI.ClassPathSignature -> TI.TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) (Maybe TI.MethodInvocation)
 getMethodType signature tp = do
   typeData <- lift get
-  maybeMethodType <- lift $ TI.getMethodType tp signature
+  maybeMethodType <- TI.getMethodType tp signature
   case maybeMethodType of
     Just _ -> return maybeMethodType
     Nothing ->
-      if TI.getTypeName tp == P.createQNameObject
+      if fst (TI.getTypeName tp) == P.createQNameObject
         then return Nothing
         else do
         let parentName = TI.getTypeParent tp
-        eitherParentType <- lift $ TI.getClassTypeInfo parentName
-        case eitherParentType of
-          Left txt -> undefined -- This should never happen
-          Right parentType -> getMethodType signature parentType
-
-getStaticMethodType :: Signature -> TI.TypeInfo -> ReaderT Environment (StateT ClassData IO) (Maybe MethodInvocation)
-getStaticMethodType signature tp = do
-  typeData <- lift get
-  lift $ TI.getStaticMethodType tp signature
-
-isStaticContext :: TypedTerm -> Bool
-isStaticContext (TypedValue (TypedTypeName _)) = True
-isStaticContext (TypedApplication (TypedReferenceTerm _ term') _) = isStaticContext term'
-isStaticContext _ = False
+        parentType <- TI.getClassTypeInfoE parentName
+        getMethodType signature parentType
 
 getDuplicateFields :: Clazz2 -> [TypeError]
 getDuplicateFields (NewClazz2 _ _ _ _ fields _) =
   snd $ foldr (\field@(NewField pos tp _ nm) (fieldMap, duplicateList) ->
     (case Map.lookup nm fieldMap of
       Nothing -> (Map.insert nm nm fieldMap, duplicateList)
-      Just _ -> (fieldMap, TypeError ("Duplicate field: "++show nm) pos:duplicateList)))
+      Just _ -> (fieldMap, TypeError ("Duplicate field: "++show nm) (SourcePos' pos):duplicateList)))
     (Map.empty, [])
     fields
 
@@ -285,7 +285,7 @@ getDuplicateMethods (NewClazz2 _ _ _ _ _ methods) =
     (case Map.lookup nm methodMap of
       Nothing -> (Map.insert nm [params] methodMap, duplicateList)
       Just paramsList -> if params `elem` paramsList
-        then (methodMap, TypeError ("Duplicate method: "++show sig) pos:duplicateList)
+        then (methodMap, TypeError ("Duplicate method: "++show sig) (SourcePos' pos):duplicateList)
         else (Map.update (\l -> Just (params:l)) nm methodMap, duplicateList)))
     (Map.empty, [])
     methods
@@ -296,7 +296,7 @@ getClassDeclaredTypeErrors (NewClazz2 _ _ _ (NewExtends pos parent) _ _) = do
   typeData <- get
   lift $ do
            let cond =  TI.isValidClass typeData parent
-           return $ [TypeError ("Undefined type: "++show parent) pos | not cond]
+           return $ [TypeError ("Undefined type: "++show parent) (SourcePos' pos) | not cond]
 
 getFieldDeclaredTypeErrors :: Clazz2 -> StateT ClassData IO [TypeError]
 getFieldDeclaredTypeErrors (NewClazz2 _ _ _ _ fields _) = do
@@ -304,7 +304,7 @@ getFieldDeclaredTypeErrors (NewClazz2 _ _ _ _ fields _) = do
   lift $ foldM (\errorList field@(NewField pos tp _ _) ->
     do
       let cond = TI.isValidClass typeData tp
-      return $ if cond then errorList else TypeError ("Undefined type: "++show tp) pos:errorList)
+      return $ if cond then errorList else TypeError ("Undefined type: "++show tp) (SourcePos' pos):errorList)
     []
     fields
 
@@ -324,7 +324,7 @@ getMethodReturnDeclaredTypeErrors (NewMethod pos _ _ tp _ _) = do
   typeData <- get
   lift $ do
            let cond = TI.isValidClass typeData tp
-           return $ [TypeError ("Undefined type: "++show tp) pos | not cond]
+           return $ [TypeError ("Undefined type: "++show tp) (SourcePos' pos) | not cond]
 
 getMethodParamDeclaredTypeErrors :: Method -> StateT ClassData IO [TypeError]
 getMethodParamDeclaredTypeErrors (NewMethod _ _ params _ _ _) =
@@ -342,7 +342,7 @@ getParamDeclaredTypeErrors params = do
   lift $ foldM (\errorList (NewParameter pos tp _) ->
     do
       let cond = TI.isValidClass typeData tp
-      return $ if cond then errorList else TypeError ("Undefined type: "++show tp) pos:errorList)
+      return $ if cond then errorList else TypeError ("Undefined type: "++show tp) (SourcePos' pos):errorList)
     []
     params
 
@@ -350,7 +350,7 @@ getAssignmentsDeclaredTypeErrors :: [Assignment]-> StateT ClassData IO [TypeErro
 getAssignmentsDeclaredTypeErrors = foldM (\errorList a -> fmap (++ errorList) (getAssignmentDeclaredTypeErrors a)) []
 
 getAssignmentDeclaredTypeErrors :: Assignment -> StateT ClassData IO [TypeError]
-getAssignmentDeclaredTypeErrors (NewAssignment pos t1 t2) = do
+getAssignmentDeclaredTypeErrors (NewAssignment lpos t1 rpos t2) = do
   t1errors <- getTermDeclaredTypeErrors t1
   t2errors <- getTermDeclaredTypeErrors t2
   return (t1errors ++ t2errors)
@@ -359,13 +359,13 @@ getTermDeclaredTypeErrors :: Term -> StateT ClassData IO [TypeError]
 getTermDeclaredTypeErrors t = do
   typeData <- get
   case t of
-    (Value (ObjectCreation pos tp params)) -> liftM2 (++) paramErrors classError
+    (Value (ObjectCreation pos (TypeName _ tp) params)) -> liftM2 (++) paramErrors classError
       where
-        classError = lift $ do let cond = TI.isValidClass typeData tp in return $ [TypeError ("Undefined type: "++show tp) pos | not cond]
+        classError = lift $ do let cond = TI.isValidClass typeData tp in return $ [TypeError ("Undefined type: "++show tp) (SourcePos' pos) | not cond]
         paramErrors = foldM (\errs t' -> fmap (++ errs) (getTermDeclaredTypeErrors t')) [] params
-    (Value (Cast pos tp term)) -> liftM2 (++) termError classError
+    (Cast (TypeName pos tp) term) -> liftM2 (++) termError classError
       where
-        classError = lift $ do let cond = TI.isValidClass typeData tp in return $ [TypeError ("Undefined type: "++show tp) pos | not cond]
+        classError = lift $ do let cond = TI.isValidClass typeData tp in return $ [TypeError ("Undefined type: "++show tp) (SourcePos' pos) | not cond]
         termError = getTermDeclaredTypeErrors term
     (Application t' (FieldAccess _ _)) -> getTermDeclaredTypeErrors t'
     (Application t' (MethodInvocation pos nm params)) ->  liftM2 (++) paramErrors termErrors
@@ -382,122 +382,89 @@ getClassInheritenceCycleErrors' (NewClazz2 _ _ _ ExtendsObject _ _) _ = return [
 getClassInheritenceCycleErrors' (NewClazz2 _ _ nm (NewExtends pos parent) _ _) classes = do
   (_,classMap) <- get
   if parent `elem` classes
-    then return [TypeError ("Cyclic Inheritence: "++show nm) pos]
+    then return [TypeError ("Cyclic Inheritence: "++show nm) (SourcePos' pos)]
     else if Map.member parent classMap
       then getClassInheritenceCycleErrors' (classMap Map.! parent) (parent : classes)
       else return []
 
-getTypedClazz :: Clazz2 -> StateT ClassData IO (Either [TypeError] TypedClazz)
+getTypedClazz :: Clazz2 -> ExceptT [TypeError] (StateT ClassData IO) TypedClazz
 getTypedClazz cls@(NewClazz2 _ _ name extends fields _) = do
-  eitherMorE <- getMethodsTermTypeErrors cls
-  return $ case eitherMorE of
-      Left methodErrors -> Left methodErrors;
-      Right typedMethods -> Right (NewTypedClazz name extends fields typedMethods)
+  typedMethodList <- getMethodsTermTypeErrors cls
+  return $ NewTypedClazz name extends fields typedMethodList
 
-getMethodsTermTypeErrors :: Clazz2 -> StateT ClassData IO (Either [TypeError] [TypedMethod])
+getMethodsTermTypeErrors :: Clazz2 -> ExceptT [TypeError] (StateT ClassData IO) [TypedMethod]
 getMethodsTermTypeErrors cls@(NewClazz2 _ _ nm _ _ methods) = do
-  typeData <- get
-  eitherList <-  mapM (getMethodTermTypeErrors cls) methods
-  let (errorList, typedMethodList) = Either.partitionEithers eitherList
-  return $ if not (null errorList) then Left (concat errorList) else Right typedMethodList
+  typeData <- lift get
+  mapM (getMethodTermTypeErrors cls) methods
 
-getMethodTermTypeErrors :: Clazz2 -> Method -> StateT ClassData IO (Either [TypeError] TypedMethod)
+getMethodTermTypeErrors :: Clazz2 -> Method -> ExceptT [TypeError] (StateT ClassData IO) TypedMethod
 getMethodTermTypeErrors cls method@(NewMethod pos nm params tp _ (MethodImpl t)) = do
-  typeData <- get
+  typeData <- lift get
   let methodEnvironment = createMethodEnvironment typeData cls method
-  eitherTypedTerm <- runReaderT (getType t) methodEnvironment
-  case eitherTypedTerm of
-    Left e -> return $ Left e
-    Right typedTerm -> if tp == TI.getBoxedType (getTypedTermType typedTerm)
-      then return $ Right (NewTypedMethod nm params tp (TypedMethodImpl typedTerm));
-      else return $ Left [TypeError ("Incorrect return type: "++show (getTypedTermType typedTerm)) pos]
+  typedTerm <- runReaderT (getType t) methodEnvironment
+  if tp == fst (TI.getBoxedType (getTypedTermType typedTerm))
+    then return $ NewTypedMethod nm params tp (TypedMethodImpl typedTerm);
+    else throwE [TypeError ("Incorrect return type: "++show (getTypedTermType typedTerm)) (SourcePos' pos)]
 getMethodTermTypeErrors cls@(NewClazz2 _ _ _ extends _ _) method@(NewMethod pos nm params tp _ (ConstructorImpl maybeConstructorInvocation assignments)) = do
-  typeData <- get
+  typeData <- lift get
   let constructorRightEnvironment = createConstructorEnvironmentRight typeData cls method
   let constructorLeftEnvironment = createConstructorEnvironmentLeft typeData cls
-  maybeEitherC <- case maybeConstructorInvocation of
+  maybeTypedConstructorInvocation <- case maybeConstructorInvocation of
     Just ci -> do
-      eitherTypedCI <- runReaderT (getTypedConstructorInvocation cls ci) constructorRightEnvironment
-      case eitherTypedCI of
-        Left e -> return $ Just $ Left e
-        Right typedCI -> return $ Just $ Right typedCI
+      typedCI <- runReaderT (getTypedConstructorInvocation cls ci) constructorRightEnvironment
+      return $ Just typedCI
     Nothing -> return Nothing
-  eitherList <- mapM (getAssignmentTypeError constructorLeftEnvironment constructorRightEnvironment) assignments
-  let (assignmentTypeErrors,typedAssignments) = Either.partitionEithers eitherList
-  case maybeEitherC of
-    Just eitherC ->
-      case eitherC of
-        Left le -> return $ Left (le ++ concat assignmentTypeErrors)
-        Right ci -> if not (null assignmentTypeErrors)
-          then return $ Left (concat assignmentTypeErrors)
-          else return $ Right (NewTypedMethod P.createNameInit params P.createQNameObject (TypedConstructorImpl ci typedAssignments))
+  typedAssignments <- mapM (getAssignmentTypeError constructorLeftEnvironment constructorRightEnvironment) assignments
+  case maybeTypedConstructorInvocation of
+    Just typedCI ->
+      return $ NewTypedMethod P.createNameInit params P.createQNameObject (TypedConstructorImpl typedCI typedAssignments)
     Nothing ->
-      if not (null assignmentTypeErrors)
-        then return $ Left (concat assignmentTypeErrors)
-        else do 
-          return $ case extends of
-            NewExtends _ qn -> Right (NewTypedMethod 
-              P.createNameInit 
-              params 
-              P.createQNameObject 
-              (TypedConstructorImpl (defaultConstructorInvocation qn)  typedAssignments))
-            ExtendsObject -> Right (NewTypedMethod 
-              P.createNameInit 
-              params 
-              P.createQNameObject 
-              (TypedConstructorImpl (defaultConstructorInvocation P.createQNameObject)  typedAssignments))
-          
+      return $ case extends of
+        NewExtends _ qn -> NewTypedMethod
+          P.createNameInit
+          params
+          P.createQNameObject
+          (TypedConstructorImpl (defaultConstructorInvocation qn)  typedAssignments)
+        ExtendsObject -> NewTypedMethod
+          P.createNameInit
+          params
+          P.createQNameObject
+          (TypedConstructorImpl (defaultConstructorInvocation P.createQNameObject)  typedAssignments)
 
 defaultConstructorInvocation :: P.QualifiedName -> TypedConstructorInvocation
 defaultConstructorInvocation parentCls = NewTypedConstructorInvocation parentCls [] []
 
-getAssignmentTypeError :: Environment -> Environment -> Assignment -> StateT ClassData IO (Either [TypeError] TypedAssignment)
-getAssignmentTypeError lenv renv (NewAssignment pos leftTerm rightTerm) = do
-  typeData <- get
+getAssignmentTypeError :: Environment -> Environment -> Assignment -> ExceptT [TypeError] (StateT ClassData IO) TypedAssignment
+getAssignmentTypeError lenv renv (NewAssignment lpos leftTerm rpos rightTerm) = do
+  typeData <- lift get
   leftTermType <- runReaderT (getType leftTerm) lenv
   rightTermType <- runReaderT (getType rightTerm) renv
-  case leftTermType of
-    Left le -> case rightTermType of
-      Left re -> return $ Left (le++re)
-      Right _ -> return $ Left le
-    Right ltp ->
-      case rightTermType of
-        Left re -> return $ Left re
-        Right rtp -> do
-          eitherrti <- TI.getClassTypeInfo (TI.getBoxedType (getTypedTermType rtp))
-          eitherlti <- TI.getClassTypeInfo (TI.getBoxedType (getTypedTermType ltp))
-          eitherIsSubtype <- TI.isSubtypeOf eitherrti eitherlti
-          case eitherIsSubtype of
-            Left txt -> return $ Left [TypeError ("Undefined type: "++T.unpack txt) pos]
-            Right isSubtype -> if isTermValidForLeftAssignment leftTerm && isSubtype
-              then return $ Right (NewTypedAssignment ltp rtp)
-              else return $ Left [TypeError "Illegal assignment" pos]
+  rti <- TI.getClassTypeInfoE (TI.getBoxedType (getTypedTermType rightTermType))
+  lti <- TI.getClassTypeInfoE (TI.getBoxedType (getTypedTermType leftTermType))
+  isSubtype <- TI.isSubtypeOfE (TI.getTypeName rti) (TI.getTypeName lti)
+  if isTermValidForLeftAssignment leftTerm && isSubtype
+    then return $ NewTypedAssignment leftTermType rightTermType
+    else throwE [TypeError "Illegal assignment" (SourcePos' rpos)]
 
 isTermValidForLeftAssignment :: Term -> Bool
 isTermValidForLeftAssignment (Application (Value (Variable _ target)) (FieldAccess _ _)) = P.createNameThis == target
 isTermValidForLeftAssignment (Application t (FieldAccess _ _)) = isTermValidForLeftAssignment t
 isTermValidForLeftAssignment t = False
 
-getTypedConstructorInvocation ::  Clazz2 -> ConstructorInvocation -> ReaderT Environment (StateT ClassData IO) (Either [TypeError] TypedConstructorInvocation)
+getTypedConstructorInvocation ::  Clazz2 -> ConstructorInvocation -> ReaderT Environment (ExceptT [TypeError] (StateT ClassData IO)) TypedConstructorInvocation
 getTypedConstructorInvocation  cls@(NewClazz2 _ _ tp extends _ _) (NewConstructorInvocation pos terms) = do
   constructorSuperInvocationEnvironment <- ask
-  eitherTermTypes <- mapM getType terms
-  if null (Either.lefts eitherTermTypes) then
-    let termTypes = Either.rights eitherTermTypes
-        signature = Signature P.createNameInit (fmap getTypedTermType termTypes) in
-        case extends of
-          (NewExtends _ parentClass) -> do
-            eitherParentTypeInfo <- lift $ TI.getClassTypeInfo parentClass
-            case eitherParentTypeInfo of
-              Left txt -> return $ Left [TypeError ("Undefined type: "++show parentClass) pos]
-              Right parentTypeInfo -> do
-                maybeSuperConstructor <- getMethodType signature parentTypeInfo
-                case maybeSuperConstructor of
-                  Nothing -> return $ Left [TypeError ("No invocation compatible constructor: "++show tp++"."++show signature) pos]
-                  Just (NewMethodInvocation _ (Signature _ targetTermTypes)) -> 
-                    return $ Right (NewTypedConstructorInvocation parentClass targetTermTypes termTypes)
-          ExtendsObject -> return $ Right (NewTypedConstructorInvocation P.createQNameObject [] [])
-  else return $ Left (concat (Either.lefts eitherTermTypes))
+  typedTerms <- mapM getType terms
+  let signature = TI.ClassPathSignature init' (fmap getTypedTermType typedTerms)
+  case extends of
+    (NewExtends ppos parentClass) -> do
+      parentTypeInfo <- lift $ TI.getClassTypeInfoE (parentClass,SourcePos' ppos)
+      maybeSuperConstructor <- lift $ getMethodType signature parentTypeInfo
+      case maybeSuperConstructor of
+        Nothing -> lift $ throwE [TypeError ("No invocation compatible constructor: "++show tp++"."++show signature) (SourcePos' pos)]
+        Just (TI.NewMethodInvocation _ (TI.ClassPathSignature _ targetTermTypes)) ->
+          return $ NewTypedConstructorInvocation parentClass targetTermTypes typedTerms
+    ExtendsObject -> return $ NewTypedConstructorInvocation P.createQNameObject [] []
 
 getConstructorsUnassignedFieldErrors :: Clazz2 -> StateT ClassData IO [TypeError]
 getConstructorsUnassignedFieldErrors cls@(NewClazz2 _ _ nm _ _ methods) = do
@@ -507,12 +474,25 @@ getConstructorsUnassignedFieldErrors cls@(NewClazz2 _ _ nm _ _ methods) = do
 getConstructorUnassignedFieldError :: Clazz2 -> Method -> [TypeError]
 getConstructorUnassignedFieldError cls@(NewClazz2 _ _ clsNm _ fields _) constructor@(NewMethod pos _ _ _ signature (ConstructorImpl _ assignments)) =
   let fieldSet = Set.fromList (fmap (\(NewField _ _ _ nm) -> nm) fields)
-      assignedFieldSet = Set.fromList (mapMaybe (\(NewAssignment _ term _) -> getAssignmentTermField term) assignments)
+      assignedFieldSet = Set.fromList (mapMaybe (\(NewAssignment _ term _ _) -> getAssignmentTermField term) assignments)
       unassignedFieldSet = Set.difference fieldSet assignedFieldSet
   in
-      if Set.size unassignedFieldSet == 0 then [] else [TypeError ("Constructor does not assign values to all fields: "++show signature) pos]
+      [TypeError ("Constructor does not assign values to all fields: "++show signature) (SourcePos' pos) | Set.size unassignedFieldSet /= 0]
 
 getAssignmentTermField :: Term -> Maybe P.SimpleName
 getAssignmentTermField (Application (Value (Variable _ target)) (FieldAccess _ fieldName)) = if target == P.createNameThis then Just fieldName else Nothing
 getAssignmentTermField (Application innerApplication@(Application _ _) _) = getAssignmentTermField innerApplication
 getAssignmentTermField _ = Nothing
+
+leastUpperBound :: [P.QualifiedName] -> ExceptT [TypeError] (StateT ClassData IO) TI.Type
+leastUpperBound typeList = do
+  st <- mapM TI.getSupertypeSet typeList
+  let ec = List.nub (List.foldl' List.intersect [] st)
+  maybeLub <-foldM (\mec tp -> case mec of
+                            Nothing -> return $ Just tp
+                            Just tp' -> ifM (TI.isSubtypeOfE (tp,P2.CompiledCode) (tp',P2.CompiledCode)) (return (Just tp)) (return (Just tp')))
+    Nothing
+    ec
+  case maybeLub of
+    Nothing -> return $ TI.L P.createQNameObject P2.CompiledCode
+    Just lub -> return $ TI.L lub P2.CompiledCode

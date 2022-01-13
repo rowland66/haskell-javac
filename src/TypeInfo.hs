@@ -1,11 +1,15 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TupleSections #-}
 
 module TypeInfo
 ( TypeInfo
-, getClassTypeInfo
-, getClassTypeInfo'
-, isSubtypeOf
+, ClassPathSignature(..)
+, MethodInvocation(..)
+, Type(..)
+, getClassTypeInfoE
+, isSubtypeOf'
+, isSubtypeOfE
 , getFieldType
 , getTypeName
 , getTypeParent
@@ -13,12 +17,18 @@ module TypeInfo
 , getStaticMethodType
 , isValidClass
 , getBoxedType
+, getUnboxedType
+, isTypeBoolean
+, isTypeInteger
+, mapParameterToType
+, getSupertypeSet
 ) where
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
 import qualified Data.List as List
-import Control.Monad.Trans.Except
+import Control.Monad.Loops (unfoldrM)
+import Control.Monad.Trans.Except ( ExceptT, runExceptT, throwE )
 import Control.Monad.ListM (sortByM)
 import Data.Bits
 import Data.Word
@@ -33,6 +43,7 @@ import Control.Monad.Trans.State.Strict (StateT,get,put,runStateT)
 import qualified Parser as P
 import qualified Parser2 as P2
 import Text.Parsec
+import qualified Data.Tuple.Extra as Data.Bifunctor
 
 {-- TypeInfo provides type information. A Local TypeInfo provides type information for types defined in the
     code being compiled. Path TypeInfo provides type information for types found on the classspath in compiled
@@ -41,37 +52,64 @@ data TypeInfo = Local P2.Clazz2 | Path ClassDescriptor
 
 type ClassData = (ClassPath,P2.LocalClasses)
 
-init' = T.pack "<init>"
+data ClassPathSignature = ClassPathSignature T.Text [Type] deriving Show
+
+data MethodInvocation = NewMethodInvocation Type ClassPathSignature deriving Show
+
+data Type = I P2.SourcePos' | Z P2.SourcePos' | L P.QualifiedName P2.SourcePos' | UnsupportedType P2.SourcePos'
+
+instance Show Type where
+  show (I _) = "I"
+  show (Z _) = "Z"
+  show (L n _) = "L"++show n++";"
+  show (UnsupportedType t) = "Unsupported: "++show t
+
+instance Eq Type where
+  (==) (I _) (I _) = True
+  (==) (Z _) (Z _) = True
+  (==) (L n1 _) (L n2 _) = n1 == n2
+  (==) _ _ = False
+
 object = T.pack "java/lang/Object"
 rparens = T.pack ")"
 semi = T.pack ";"
 
-getTypeName :: TypeInfo -> P.QualifiedName
-getTypeName (Local (P2.NewClazz2 _ _ nm _ _ _)) = nm
-getTypeName (Path ClassDescriptor {..}) = P.constructQualifiedName name
+readType :: T.Text -> Type
+readType t | T.unpack (T.take 1 t) == "I" = I P2.CompiledCode
+readType t | T.unpack (T.take 1 t) == "Z" = Z P2.CompiledCode
+readType t | T.unpack (T.take 1 t) == "L" = L (P.constructQualifiedName $ T.drop 1 (T.dropEnd 1 t)) P2.CompiledCode
+readType t  = UnsupportedType P2.CompiledCode
 
-getTypeParent :: TypeInfo -> P.QualifiedName
-getTypeParent (Local (P2.NewClazz2 _ _ _ (P2.NewExtends _ nm) _ _)) = nm
-getTypeParent (Local (P2.NewClazz2 _ _ _ P2.ExtendsObject _ _)) = P.createQNameObject
-getTypeParent (Path ClassDescriptor {..}) = if T.length parent == 0 then P.createQNameObject else P.constructQualifiedName parent
+getTypeName :: TypeInfo -> (P.QualifiedName,P2.SourcePos')
+getTypeName (Local (P2.NewClazz2 pos _ nm _ _ _)) = (nm,P2.SourcePos' pos)
+getTypeName (Path ClassDescriptor {..}) = (P.constructQualifiedName name,P2.CompiledCode)
 
-getFieldType :: TypeInfo -> P.SimpleName -> Maybe P2.Type
+getTypeParent :: TypeInfo -> (P.QualifiedName,P2.SourcePos')
+getTypeParent (Local (P2.NewClazz2 _ _ _ (P2.NewExtends pos nm) _ _)) = (nm,P2.SourcePos' pos)
+getTypeParent (Local (P2.NewClazz2 pos _ _ P2.ExtendsObject _ _)) = (P.createQNameObject, P2.SourcePos' pos)
+getTypeParent (Path ClassDescriptor {..}) = if T.length parent == 0
+  then (P.createQNameObject,P2.CompiledCode)
+  else (P.constructQualifiedName parent,P2.CompiledCode)
+
+getFieldType :: TypeInfo -> P.SimpleName -> Maybe Type
 getFieldType (Local (P2.NewClazz2 _ _ _ _ fields _)) nm =
   let maybeMatchingField = List.find (\(P2.NewField _ _ _ fieldNm) -> nm == fieldNm) fields
   in
-    fmap (\(P2.NewField _ tp _ _) -> P2.L tp) maybeMatchingField
+    fmap (\(P2.NewField pos tp _ _) -> L tp (P2.SourcePos' pos)) maybeMatchingField
 getFieldType (Path ClassDescriptor {..}) nm =
   let maybeMatchingField = List.find (\Field {..} -> showt nm == fname) fields
   in
-    fmap (\Field {..} -> P2.readType ftype) maybeMatchingField
+    fmap (\Field {..} -> readType ftype) maybeMatchingField
 
-getMethodType :: TypeInfo -> P2.Signature -> StateT ClassData IO (Maybe P2.MethodInvocation)
+getMethodType :: TypeInfo -> ClassPathSignature -> ExceptT [P2.TypeError] (StateT ClassData IO) (Maybe MethodInvocation)
 getMethodType (Local (P2.NewClazz2 _ _ _ _ _ methods)) signature = do
   candidateMethods <- filterCandidateMethods1 methods signature
   sortedMethodList <- sortByM methodSpecificitySorter candidateMethods
   if null sortedMethodList
     then return Nothing
-    else return $ Just ((\(P2.NewMethod _ _ _ tp sig _) -> P2.NewMethodInvocation (P2.L tp) sig) (List.head sortedMethodList))
+    else return $ Just ((\(P2.NewMethod pos _ _ tp sig _) ->
+      NewMethodInvocation (L tp (P2.SourcePos' pos)) (mapSignatureToClassPathSignature sig))
+      (List.head sortedMethodList))
 getMethodType (Path ClassDescriptor {..}) signature = do
   candidateMethods <- filterCandidateMethods2 methods signature
   sortedMethodList <- sortByM methodSpecificitySorter2 candidateMethods
@@ -79,16 +117,18 @@ getMethodType (Path ClassDescriptor {..}) signature = do
     then return Nothing
     else return $ Just
       (let method = List.head sortedMethodList in
-      P2.NewMethodInvocation (mapMethodToType method) (mapMethodToSignature method))
+      NewMethodInvocation (mapMethodToType method) (mapMethodToSignature method))
 
-getStaticMethodType :: TypeInfo -> P2.Signature -> StateT ClassData IO (Maybe P2.MethodInvocation)
+getStaticMethodType :: TypeInfo -> ClassPathSignature -> ExceptT [P2.TypeError] (StateT ClassData IO) (Maybe MethodInvocation)
 getStaticMethodType (Local (P2.NewClazz2 _ _ _ _ _ methods)) signature = do
   let staticMethods = List.filter (\P2.NewMethod {} -> False) methods
   candidateMethods <- filterCandidateMethods1 staticMethods signature
   sortedMethodList <- sortByM methodSpecificitySorter candidateMethods
   if null sortedMethodList
     then return Nothing
-    else return $ Just ((\(P2.NewMethod _ _ _ tp sig _) -> P2.NewMethodInvocation (P2.L tp) sig) (List.head sortedMethodList))
+    else return $ Just ((\(P2.NewMethod pos _ _ tp sig _) ->
+      NewMethodInvocation (L tp (P2.SourcePos' pos)) (mapSignatureToClassPathSignature sig))
+      (List.head sortedMethodList))
 getStaticMethodType (Path ClassDescriptor {..}) signature = do
   let staticMethods = List.filter (\(Method _ _ accessFlags) -> (accessFlags .|. 0x0008) > 0) methods
   candidateMethods <- filterCandidateMethods2 staticMethods signature
@@ -97,56 +137,56 @@ getStaticMethodType (Path ClassDescriptor {..}) signature = do
     then return Nothing
     else return $ Just
       (let method = List.head sortedMethodList in
-      P2.NewMethodInvocation (mapMethodToType method) (mapMethodToSignature method))
+      NewMethodInvocation (mapMethodToType method) (mapMethodToSignature method))
 
-filterCandidateMethods1 :: [P2.Method] -> P2.Signature -> StateT ClassData IO [P2.Method]
-filterCandidateMethods1 methods signature@(P2.Signature searchName searchParams) = do
-  let candidateMatchingMethods = List.filter (\(P2.NewMethod _ nm _ _ _ _) -> nm == searchName) methods
+filterCandidateMethods1 :: [P2.Method] -> ClassPathSignature -> ExceptT [P2.TypeError] (StateT ClassData IO) [P2.Method]
+filterCandidateMethods1 methods signature@(ClassPathSignature searchName searchParams) = do
+  let candidateMatchingMethods = List.filter (\(P2.NewMethod _ nm _ _ _ _) -> P.deconstructSimpleName nm == searchName) methods
   let candidateMatchingMethods2 = List.filter (\(P2.NewMethod _ _ p _ _ _) -> length p == length searchParams) candidateMatchingMethods
   filterM (\(P2.NewMethod _ _ ps _ _ _) ->
-    fmap (\case Right b -> b; Left _ -> False)
-      (runExceptT (areParametersInvocationCompatible searchParams (fmap mapParameterToType ps)))) candidateMatchingMethods2
+      areParametersInvocationCompatible (fmap getBoxedType searchParams) (fmap mapParameterToType ps)) candidateMatchingMethods2
 
-filterCandidateMethods2 :: [Method] -> P2.Signature -> StateT ClassData IO [Method]
-filterCandidateMethods2 methods signature@(P2.Signature searchName searchParams) = do
-  let candidateMatchingMethods = List.filter (\Method {..} -> mname == P.deconstructSimpleName searchName) methods
+filterCandidateMethods2 :: [Method] -> ClassPathSignature -> ExceptT [P2.TypeError] (StateT ClassData IO) [Method]
+filterCandidateMethods2 methods signature@(ClassPathSignature searchName searchParams) = do
+  let candidateMatchingMethods = List.filter (\Method {..} -> mname == searchName) methods
   let candidateMatchingMethods2 = List.filter (\Method {..} -> descriptorParamCount mdescriptor == length searchParams) candidateMatchingMethods
-  filterM (fmap (\case Right b -> b; Left _ -> False) .
-    runExceptT . areParametersInvocationCompatible searchParams . mapMethodToParamTypeList) candidateMatchingMethods2
+  filterM (areParametersInvocationCompatible (fmap getBoxedType searchParams) . mapMethodToParamTypeList) candidateMatchingMethods2
 
-areParametersInvocationCompatible :: [P2.Type] -> [P2.Type] -> ExceptT T.Text (StateT ClassData IO) Bool
+areParametersInvocationCompatible :: [(P.QualifiedName,P2.SourcePos')] -> [Type] -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
 areParametersInvocationCompatible sigParamTypes candidateParams =
   foldM (\r (ptp, candidatetp) ->
     (r &&) <$> isTypeInvocationCompatible ptp candidatetp) True (zip sigParamTypes candidateParams)
 
-areParametersInvocationCompatible2 :: [P2.Parameter] -> [P2.Parameter] -> ExceptT T.Text (StateT ClassData IO) Bool
+areParametersInvocationCompatible2 :: [P2.Parameter] -> [P2.Parameter] -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
 areParametersInvocationCompatible2 sigParams candidateParams =
   areParametersInvocationCompatible
-    (fmap (\(P2.NewParameter _ tp _) -> P2.L tp) sigParams)
-    (fmap (\(P2.NewParameter _ tp _) -> P2.L tp) candidateParams)
+    (fmap (\(P2.NewParameter pos tp _) -> (tp, P2.SourcePos' pos)) sigParams)
+    (fmap (\(P2.NewParameter pos tp _) -> L tp (P2.SourcePos' pos)) candidateParams)
 
-isTypeInvocationCompatible :: P2.Type -> P2.Type -> ExceptT T.Text (StateT ClassData IO) Bool
-isTypeInvocationCompatible _ (P2.Unsupported _) = return False
-isTypeInvocationCompatible (P2.Unsupported _) _ = return False
-isTypeInvocationCompatible baseType candidateType = isSubtypeOfE (getBoxedType baseType) (getBoxedType candidateType)
+isTypeInvocationCompatible :: (P.QualifiedName, P2.SourcePos') -> Type -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
+isTypeInvocationCompatible _ (UnsupportedType _) = return False
+isTypeInvocationCompatible baseType (I sp) = isSubtypeOfE baseType (P.createQNameInteger, sp)
+isTypeInvocationCompatible baseType (Z sp) = isSubtypeOfE baseType (P.createQNameBoolean, sp)
+isTypeInvocationCompatible baseType (L qn sp) = isSubtypeOfE baseType (qn,sp)
 
-
-
-methodSpecificitySorter :: P2.Method -> P2.Method -> StateT ClassData IO Ordering
+methodSpecificitySorter :: P2.Method -> P2.Method -> ExceptT [P2.TypeError] (StateT ClassData IO) Ordering
 methodSpecificitySorter (P2.NewMethod _ _ m1params _ _ _) (P2.NewMethod _ _ m2params _ _ _) = do
-  eitherResult <- runExceptT $ areParametersInvocationCompatible2 m1params m2params
-  return $ case eitherResult of
-    Left txt -> undefined -- This should never happen as types have been resoved already
-    Right b -> if b then LT else GT
+  b <- areParametersInvocationCompatible2 m1params m2params
+  return $ if b then LT else GT
 
-methodSpecificitySorter2 :: Method -> Method -> StateT ClassData IO Ordering
+methodSpecificitySorter2 :: Method -> Method -> ExceptT [P2.TypeError] (StateT ClassData IO) Ordering
 methodSpecificitySorter2 method1 method2 = do
   let m1params = mapMethodToParamTypeList method1
   let m2params = mapMethodToParamTypeList method2
-  eitherResult <- runExceptT $ areParametersInvocationCompatible m1params m2params
-  return $ case eitherResult of
-    Left txt -> undefined -- This should never happen as types have been resoved already
-    Right b -> if b then LT else GT
+  b <- areParametersInvocationCompatible (fmap getBoxedType m1params) m2params
+  return $ if b then LT else GT
+
+mapSignatureToClassPathSignature :: P2.Signature -> ClassPathSignature
+mapSignatureToClassPathSignature (P2.Signature sn params) =
+  ClassPathSignature (P.deconstructSimpleName sn) (fmap qualifiedNameToType params)
+
+qualifiedNameToType :: (P.QualifiedName,SourcePos) -> Type
+qualifiedNameToType (qn,pos) = L qn (P2.SourcePos' pos)
 
 descriptorParamCount :: T.Text -> Int
 descriptorParamCount descriptor =
@@ -154,31 +194,36 @@ descriptorParamCount descriptor =
   in
     length paramTypes
 
-getBoxedType :: P2.Type -> P.QualifiedName
-getBoxedType P2.I = P.createQNameInteger
-getBoxedType P2.Z = P.createQNameBoolean
-getBoxedType (P2.L qn) = qn
-getBoxedType (P2.Unsupported t) = trace ("Unsupport boxing"++show t) undefined
+getBoxedType :: Type -> (P.QualifiedName,P2.SourcePos')
+getBoxedType (I sp) = (P.createQNameInteger, sp)
+getBoxedType (Z sp) = (P.createQNameBoolean, sp)
+getBoxedType tp@(L qn sp) = (qn,sp)
+getBoxedType (UnsupportedType _) = undefined
 
-mapMethodToSignature :: Method -> P2.Signature
+getUnboxedType :: Type -> Type
+getUnboxedType (L qn sp) | qn == P.createQNameBoolean = Z sp
+                         | qn == P.createQNameInteger = I sp
+getUnboxedType t = t
+
+mapMethodToSignature :: Method -> ClassPathSignature
 mapMethodToSignature method@Method {..} =
   let (paramTypes,_) = parseMethodDescriptor mdescriptor
   in
-    P2.Signature (P.constructSimpleName mname) paramTypes
+    ClassPathSignature mname paramTypes
 
-mapMethodToParamTypeList :: Method -> [P2.Type]
+mapMethodToParamTypeList :: Method -> [Type]
 mapMethodToParamTypeList Method {..} =
   let (paramTypes,_) = parseMethodDescriptor mdescriptor
   in
     paramTypes
 
-mapMethodToType :: Method -> P2.Type
+mapMethodToType :: Method -> Type
 mapMethodToType Method {..} =
   let (_,returnType) = parseMethodDescriptor mdescriptor
   in
     returnType
 
-parseMethodDescriptor :: T.Text -> ([P2.Type],P2.Type)
+parseMethodDescriptor :: T.Text -> ([Type],Type)
 parseMethodDescriptor t =
   let eitherResult = runParser parseMethodDescriptor' () (T.unpack t) (T.unpack t)
   in
@@ -195,27 +240,27 @@ parseMethodDescriptor' = do
 parsePrimitiveType = do
   c <- char 'I' <|> char 'Z' <|> char 'V' <|> char 'B' <|> char 'C' <|> char 'D' <|> char 'F' <|> char 'J' <|> char 'S' <|> char '['
   return $ case c of
-    'I' -> P2.I
-    'Z' -> P2.Z
-    _ -> P2.Unsupported (T.pack [c])
+    'I' -> I P2.CompiledCode
+    'Z' -> Z P2.CompiledCode
+    _ -> UnsupportedType P2.CompiledCode
 
 parseReferenceType = do
   char 'L'
   s <-manyTill anyChar (char ';')
-  return $ P2.L $ P.constructQualifiedName (T.pack s)
+  return $ L (P.constructQualifiedName (T.pack s)) P2.CompiledCode
 
-mapParameterToType :: P2.Parameter -> P2.Type
-mapParameterToType (P2.NewParameter _ tp _) = P2.L tp
+mapParameterToType :: P2.Parameter -> Type
+mapParameterToType (P2.NewParameter pos tp _) = L tp (P2.SourcePos' pos)
 
-getClassTypeInfoE :: P.QualifiedName -> ExceptT T.Text (StateT ClassData IO) TypeInfo
-getClassTypeInfoE tp  = do
+getClassTypeInfoE :: (P.QualifiedName,P2.SourcePos') -> ExceptT [P2.TypeError] (StateT ClassData IO) TypeInfo
+getClassTypeInfoE (tp,pos) = do
   (classPath, classMap) <- lift get
   if Map.member tp classMap
-    then case fmap Local (classMap Map.!? tp) of Just a -> return a; Nothing -> throwE (showt tp)
+    then case fmap Local (classMap Map.!? tp) of Just a -> return a; Nothing -> throwE [P2.TypeError ("Undefined type: "++T.unpack (showt tp)) pos]
     else do
       (maybecd,classPath') <- lift . lift $ runStateT (getClass (showt tp)) classPath
       lift $ put (classPath',classMap)
-      case fmap Path maybecd of Just cd -> return cd; Nothing -> throwE (showt tp)
+      case fmap Path maybecd of Just cd -> return cd; Nothing -> throwE [P2.TypeError ("Undefined type: "++T.unpack (showt tp)) pos]
 
 getClassTypeInfo :: P.QualifiedName -> StateT ClassData IO (Either T.Text TypeInfo)
 getClassTypeInfo tp  = do
@@ -232,46 +277,54 @@ getClassTypeInfo' eTp  = case eTp of
   Left txt -> return $ Left txt
   Right tp -> getClassTypeInfo tp
 
-isSubtypeOfE :: P.QualifiedName  -> P.QualifiedName  -> ExceptT T.Text (StateT ClassData IO) Bool
+isSubtypeOfE :: (P.QualifiedName,P2.SourcePos')  -> (P.QualifiedName,P2.SourcePos') -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
 isSubtypeOfE childQn parentQn = do
   childType <- getClassTypeInfoE childQn
   parentType <- getClassTypeInfoE parentQn
-  if (getTypeName childType == getTypeName parentType) || (getTypeParent childType == getTypeName parentType)
+  if (fst (getTypeName childType) == fst (getTypeName parentType)) || (fst (getTypeParent childType) == fst (getTypeName parentType))
     then return True
     else do
       let childParentQName = getTypeParent childType
-      if childParentQName == getTypeName childType -- Only java/lang/Object has itself as a parent
+      if fst childParentQName == fst (getTypeName childType) -- Only java/lang/Object has itself as a parent
         then return False
         else do
           isSubtypeOfE childParentQName parentQn
 
-isSubtypeOfE' :: Either T.Text TypeInfo -> Either T.Text TypeInfo -> ExceptT T.Text (StateT ClassData IO) Bool
+{--
+isSubtypeOfE' :: Either T.Text TypeInfo -> Either [P2.TypeError] TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
 isSubtypeOfE' eChildType eParentType = do
   case eChildType of
     Left txt -> throwE txt
     Right childType -> case eParentType of
       Left txt -> throwE txt
       Right parentType -> isSubtypeOfE (getTypeName childType) (getTypeName parentType)
+-}
 
-isSubtypeOf' :: TypeInfo -> TypeInfo -> StateT ClassData IO (Either T.Text Bool)
-isSubtypeOf' childType parentType = do
-  if (getTypeName childType == getTypeName parentType) || (getTypeParent childType == getTypeName parentType)
-    then return $ Right True
-    else do
-      let childParentQName = getTypeParent childType
-      if childParentQName == getTypeName childType
-        then return $ Right False
-        else do
-          eitherChildParent <- getClassTypeInfo childParentQName
-          join <$> mapM (`isSubtypeOf'` parentType) eitherChildParent
+isSubtypeOf' :: TypeInfo -> TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
+isSubtypeOf' childType parentType = isSubtypeOfE (getTypeName childType) (getTypeName parentType)
 
-isSubtypeOf :: Either T.Text TypeInfo -> Either T.Text TypeInfo -> StateT ClassData IO (Either T.Text Bool)
+{--
+isSubtypeOf :: Either T.Text TypeInfo -> Either T.Text TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) Bool
 isSubtypeOf eChildType eParentType = do
   case eChildType of
     Left txt -> return $ Left txt
     Right childType -> case eParentType of
       Left txt -> return $ Left txt
       Right parentType -> isSubtypeOf' childType parentType
+-}
 
 isValidClass :: ClassData -> P.QualifiedName -> Bool
 isValidClass (classPath,classMap) tp = Map.member tp classMap || hasClass classPath (toText (showb tp))
+
+isTypeBoolean :: Type -> Bool
+isTypeBoolean (Z _) = True
+isTypeBoolean _ = False
+
+isTypeInteger :: Type -> Bool
+isTypeInteger (I _) = True
+isTypeInteger _ = False
+
+getSupertypeSet :: P.QualifiedName -> ExceptT [P2.TypeError] (StateT ClassData IO) [P.QualifiedName]
+getSupertypeSet tp = do
+  unfoldrM (\qn -> if qn /= P.createQNameObject then fmap (\ti -> Just (qn, fst (getTypeParent ti))) (getClassTypeInfoE (qn,P2.CompiledCode)) else return Nothing) tp
+

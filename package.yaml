@@ -35,9 +35,10 @@ dependencies:
 - extra
 - tuple
 - monadlist
+- monad-loops
 
 executables:
-  javac-exe:
+  hjavac:
     main:                Main.hs
     source-dirs:         src
 #    ghc-options:

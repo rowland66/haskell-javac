@@ -21,6 +21,8 @@ data Token = Ide T.Text
            | Comma
            | Assign
            | Asterick
+           | Colon
+           | Question
            | Keyword String
            | IntegerLiteral Int32
            | StringLiteral String
@@ -86,7 +88,7 @@ escCarriageReturn = fmap (const '\r') (try $ string "\\r")
 escBackSlash :: Parser Char
 escBackSlash = fmap (const '\\') (try $ string "\\\\")
 
-lbrace, rbrace, lparens, rparens, semi, dot, comma, operator, asterick:: Parser TokenPos
+lbrace, rbrace, lparens, rparens, semi, dot, comma, operator, asterick, colon, question:: Parser TokenPos
 lbrace = parseCharToken '{' LBrace
 rbrace = parseCharToken '}' RBrace
 lparens = parseCharToken '(' LParens
@@ -96,6 +98,8 @@ dot = parseCharToken '.' Dot
 comma = parseCharToken ',' Comma
 operator = parseCharToken '=' Assign
 asterick = parseCharToken '*' Asterick
+colon = parseCharToken ':' Colon
+question = parseCharToken '?' Question
 
 parseCharToken :: Char -> Token -> Parser TokenPos
 parseCharToken c t = do p <- getPosition; char c; return (t,p)
@@ -136,6 +140,8 @@ token = skipMany (comments >> spaces) >> choice
     , comma
     , asterick
     , operator
+    , colon
+    , question
     ]
 
 tokens :: Parser [TokenPos]

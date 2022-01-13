@@ -22,7 +22,7 @@ source-repository head
   type: git
   location: https://github.com/rowland66/haskell-javac
 
-executable javac-exe
+executable hjavac
   main-is: Main.hs
   other-modules:
       ByteCodeBuilder
@@ -34,6 +34,7 @@ executable javac-exe
       Lexer
       Parser
       Parser2
+      StackMapBuilder
       TypeChecker
       TypeInfo
       Paths_javac
@@ -48,6 +49,7 @@ executable javac-exe
     , directory
     , extra
     , filepattern
+    , monad-loops
     , monadlist
     , parsec
     , split

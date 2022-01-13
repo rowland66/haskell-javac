@@ -1,10 +1,13 @@
 package org.rowland;
 
+import java.util.Vector;
+
 class A extends Object {
   String foo;
   String foo2;
   Integer bar;
   Boolean b;
+  Vector v;
 
   A(C initFoo) {
     super();
@@ -12,6 +15,7 @@ class A extends Object {
     this.foo2 = "Smit";
     this.bar = 5;
     this.b = true;
+    this.v = new Vector();
   }
 
   Pair test(B foo, Pair bar) {
@@ -38,7 +42,7 @@ class A extends Object {
     Calling method with parameters of different types, and boxing result.
    */
   Boolean test(Integer a) {
-    return this.bar.equals(a);
+    return this.v.add(a);
   }
 
   Integer compare(String a) {
@@ -52,4 +56,14 @@ class A extends Object {
   Integer calcFloorDiv(Integer a) {
     return java.lang.Math.floorDiv(this.bar,a);
   }
+
+  Integer getStringFromInt(Integer a, Integer b) {
+    return "SuperFoo".replaceAll(this.bar.equals(a) ? "Eq" : "Ne",this.bar.equals(a) ? "Eq" : "Ne").length();
+    //return (this.bar.equals(a) ? "Eq" : "Ne");
+  }
+
+  Integer paramTester(String a, String b) {
+    return this.getStringFromInt(a.equals("Ne") ? Integer.sum(4,2) : 2, b.equals("Ne") ? 3 : 1);
+  }
+
 }

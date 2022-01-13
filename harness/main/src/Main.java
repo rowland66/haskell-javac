@@ -11,7 +11,9 @@ class Main {
         System.out.println(b);
         System.out.println(a.compare("Rowland"));
         System.out.println(a.getCodePoint());
-        System.out.println(a.calcFloorDiv(null));
+        System.out.println(a.calcFloorDiv(4));
+        System.out.println(a.getStringFromInt(4,2));
+        System.out.println(a.paramTester("Ne", "Eq"));
     }
 
     Integer a;

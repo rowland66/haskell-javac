@@ -1,6 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
-{-# HLINT ignore "Use camelCase" #-}
 
 {-- The ClassPath module provide access to Java .class files in the classpath. Data from these classes
     is required by the compiler. A ClassPath type provides map from package names to a second map from
@@ -91,6 +90,10 @@ data Cp_info = ClassInfo CONSTANT_Class_info
              | ConstantFloatInfo CONSTANT_Float_info
              | ConstantLongInfo CONSTANT_Long_info
              | ConstantDoubleInfo CONSTANT_Double_info
+             | MethodHandleInfo CONSTANT_MethodHandle_info
+             | MethodTypeInfo CONSTANT_MethodType_info
+             | DynamicInfo CONSTANT_Dynamic_info
+             | InvokeDynamicInfo CONSTANT_InvokeDynamic_info
              | Empty
              deriving (Show)
 
@@ -125,6 +128,20 @@ newtype CONSTANT_Float_info = CONSTANT_Float_info { f_bytes :: Word32 } deriving
 newtype CONSTANT_Long_info = CONSTANT_Long_info { l_bytes :: Word64 } deriving (Show)
 
 newtype CONSTANT_Double_info = CONSTANT_Double_info { d_bytes :: Word64 } deriving (Show)
+
+data CONSTANT_MethodHandle_info = CONSTANT_MethodHandle_info { mh_reference_kind :: Word8
+                                                             , mh_reference_index :: Int 
+                                                             } deriving Show
+
+data CONSTANT_MethodType_info = CONSTANT_MethodType_info { mt_descriptor_index :: Int } deriving Show
+
+data CONSTANT_Dynamic_info = CONSTANT_Dynamic_info { d_bootstrap_method_attr_index :: Int 
+                                                   , d_name_and_type_index :: Int 
+                                                   } deriving Show
+
+data CONSTANT_InvokeDynamic_info = CONSTANT_InvokeDynamic_info { id_bootstrap_method_attr_index :: Int 
+                                                               , id_name_and_type_index :: Int 
+                                                               } deriving Show
 
 data Field_info = Field_info { fi_access_flags :: !Word16
                              , fi_name_index :: Int
@@ -222,6 +239,10 @@ readConstantPoolInfo handle = do
       10 -> fmap MethodrefInfo (readMethodrefInfo handle)
       11 -> fmap InterfaceMethodrefInfo (readInterfaceMethodrefInfo handle)
       12 -> fmap NameAndTypeInfo (readNameAndTypeInfo handle)
+      15 -> fmap MethodHandleInfo (readMethodHandleInfo handle)
+      16 -> fmap MethodTypeInfo (readMethodTypeInfo handle)
+      17 -> fmap DynamicInfo (readDynamicInfo handle)
+      18 -> fmap InvokeDynamicInfo (readInvokeDynamicInfo handle)
       _ -> do
         error ("Unsupported constant table type "++show tag)
     if tag == 5 || tag == 6 then do
@@ -265,6 +286,30 @@ readInterfaceMethodrefInfo handle = do
   imri_class_index <- getIndex handle
   imri_name_and_type_index <- getIndex handle
   return $ CONSTANT_InterfaceMethodref_info {..}
+
+readMethodHandleInfo :: Handle -> IO CONSTANT_MethodHandle_info
+readMethodHandleInfo handle = do
+  byte <- B.hGet handle 1
+  let mh_reference_kind = (decode byte :: Word8)
+  mh_reference_index <- getIndex handle
+  return $ CONSTANT_MethodHandle_info {..}
+
+readMethodTypeInfo :: Handle -> IO CONSTANT_MethodType_info
+readMethodTypeInfo handle = do
+  mt_descriptor_index <- getIndex handle
+  return $ CONSTANT_MethodType_info {..}
+
+readDynamicInfo :: Handle -> IO CONSTANT_Dynamic_info
+readDynamicInfo handle = do
+  d_bootstrap_method_attr_index <- getIndex handle
+  d_name_and_type_index <- getIndex handle
+  return $ CONSTANT_Dynamic_info {..}
+
+readInvokeDynamicInfo :: Handle -> IO CONSTANT_InvokeDynamic_info
+readInvokeDynamicInfo handle = do
+  id_bootstrap_method_attr_index <- getIndex handle
+  id_name_and_type_index <- getIndex handle
+  return $ CONSTANT_InvokeDynamic_info {..}
 
 readStringInfo :: Handle -> IO CONSTANT_String_info
 readStringInfo handle = do

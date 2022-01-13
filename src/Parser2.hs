@@ -3,7 +3,6 @@
 
 module Parser2
   ( parseClasses2
-  , Type(..)
   , Abstraction(..)
   , Value(..)
   , Term(..)
@@ -17,17 +16,19 @@ module Parser2
   , MethodImplementation(..)
   , Clazz2(..)
   , SourcePos'(..)
-  , MethodInvocation(..)
+  , TypeName(..)
+  , TypeError(..) -- defined here to be shared by TypeInfo and TypeChecker
   , getClazz2Name
   , LocalClasses
   , isValidClass
-  , readType
+  , getTermPosition
   ) where
 
 import TextShow
 import Data.Functor.Identity (Identity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import Data.Maybe(isNothing)
 import Data.List (intercalate,foldl')
 import Data.Int (Int32)
 import Text.Parsec.Prim
@@ -38,7 +39,7 @@ import qualified Parser as P
 import ClassPath (ClassPath,hasClass)
 import Lexer
     ( TokenPos,
-      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword, IntegerLiteral, StringLiteral, BooleanLiteral) )
+      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword, IntegerLiteral, StringLiteral, BooleanLiteral, Question, Colon) )
 import Debug.Trace
 import Control.Monad.Extra (ifM)
 import Parser (NameToPackageMap)
@@ -49,42 +50,51 @@ data Abstraction = FieldAccess SourcePos P.SimpleName
                  | MethodInvocation SourcePos P.SimpleName [Term]
                  deriving Show
 
+data TypeName = TypeName SourcePos P.QualifiedName deriving Show
+
 data Value = Variable SourcePos P.SimpleName
-           | TypeName SourcePos P.QualifiedName
            | IntegerLit SourcePos Int32
            | StringLit SourcePos String
            | BooleanLit SourcePos Bool
-           | ObjectCreation SourcePos P.QualifiedName [Term]
-           | Cast SourcePos P.QualifiedName Term
+           | ObjectCreation SourcePos TypeName [Term]
            deriving Show
 
-data Term = Value Value | Application Term Abstraction deriving Show
+data Term = Value Value
+          | Application Term Abstraction
+          | StaticApplication TypeName Abstraction
+          | Conditional Term Term Term
+          | Cast TypeName Term
+          deriving Show
 
 type ClassData = (ClassPath,LocalClasses)
 
+data TypeError = TypeError String SourcePos'
+
+instance Show TypeError where
+  show (TypeError str pos) = str ++ "\nat: " ++ show pos
+
 getTermPosition :: Term -> SourcePos
 getTermPosition (Value (Variable pos _)) = pos
-getTermPosition (Value (TypeName pos _)) = pos
 getTermPosition (Value (IntegerLit pos _)) = pos
 getTermPosition (Value (StringLit pos _)) = pos
 getTermPosition (Value (BooleanLit pos _)) = pos
 getTermPosition (Value (ObjectCreation pos _ _)) = pos
-getTermPosition (Value (Cast pos _ _)) = pos
+getTermPosition (Cast (TypeName pos _) _) = pos
 getTermPosition (Application t _) = getTermPosition t
+getTermPosition (StaticApplication (TypeName pos _) _) = pos
+getTermPosition (Conditional t _ _) = getTermPosition t
 
 type LocalClasses = Map.Map P.QualifiedName Clazz2
 
 data SourcePos' = SourcePos' SourcePos | CompiledCode
 
-data Type = I | Z | L P.QualifiedName | Unsupported T.Text deriving Eq
-
 data Extends = NewExtends SourcePos P.QualifiedName | ExtendsObject
 
 data ConstructorInvocation = NewConstructorInvocation SourcePos [Term] deriving Show
 
-data Assignment = NewAssignment SourcePos Term Term deriving Show
+data Assignment = NewAssignment SourcePos Term SourcePos Term deriving Show
 
-data Signature = Signature P.SimpleName [Type]
+data Signature = Signature P.SimpleName [(P.QualifiedName,SourcePos)]
 
 data Parameter = NewParameter SourcePos P.QualifiedName P.SimpleName deriving Show
 
@@ -94,15 +104,11 @@ data Method = NewMethod SourcePos P.SimpleName [Parameter] P.QualifiedName Signa
 
 data Clazz2 = NewClazz2 SourcePos P.CompilationUnit P.QualifiedName Extends [Field] [Method]
 
-data MethodInvocation = NewMethodInvocation Type Signature deriving Show
-
 data MethodImplementation = MethodImpl Term | ConstructorImpl (Maybe ConstructorInvocation) [Assignment]
 
-instance Show Type where
-  show I = "I"
-  show Z = "Z"
-  show (L n) = "L"++show n++";"
-  show (Unsupported s) = show s
+instance Show SourcePos' where
+  show (SourcePos' pos) = show pos
+  show CompiledCode = "Compiled Code"
 
 {-- Parameters are equal if their types are equal. This is convenient in some cases, but might cause problems in others -}
 instance Eq Parameter where
@@ -134,12 +140,6 @@ instance Show Clazz2 where
       foldr (\f str -> show f++"\n"++str) "" fields ++
       foldr (\c str -> show c++"\n"++str) "" methods
 
-readType :: T.Text -> Type
-readType t | T.unpack (T.take 1 t) == "I" = I
-readType t | T.unpack (T.take 1 t) == "Z" = Z
-readType t | T.unpack (T.take 1 t) == "L" = L $ P.constructQualifiedName $ T.drop 1 (T.dropEnd 1 t)
-readType t  =  undefined
-
 getClazz2Name :: Clazz2 -> P.QualifiedName
 getClazz2Name (NewClazz2 _ _ nm _ _ _) = nm
 
@@ -160,26 +160,26 @@ mapClazz classMap (P.NewClazz pos cu name maybeExtends fields constructors metho
 
 mapExtends :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> [TokenPos] -> Either ParseError Extends
 mapExtends P.CompilationUnit {..} classMap =
-  runParser parseExtends (TermState {termStack=[],..}) ""
+  runParser parseExtends (TermState {termStack=[],maybeTypeName=Nothing,..}) ""
 
 mapField :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Field -> Either ParseError Field
 mapField P.CompilationUnit {..} classMap (P.NewField toks) = do
-  (tppos,tp,nmpos,nm) <- runParser parseField (TermState {termStack=[],..}) "" toks
+  (tppos,tp,nmpos,nm) <- runParser parseField (TermState {termStack=[],maybeTypeName=Nothing,..}) "" toks
   return (NewField tppos tp nmpos nm)
 
 mapConstructor :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Constructor -> Either ParseError Method
 mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks (P.NewBody bodyToks)) = do
-  params <- runParser parameter (TermState  {termStack=[],..}) "" toks
-  (super, assignments) <- runParser constructorBody (TermState  {termStack=[],..}) "" bodyToks
+  params <- runParser parameter (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" toks
+  (super, assignments) <- runParser constructorBody (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
   return (NewMethod pos P.createNameInit params P.createQNameObject (createSignature P.createNameInit params) (ConstructorImpl super assignments))
 
 mapMethod :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Method -> Either ParseError Method
 mapMethod P.CompilationUnit {..} classMap (P.NewMethod tpTok nmTok paramsToks (P.NewBody bodyToks)) = do
-  toks <- runParser satisfyQualifiedName (TermState {termStack=[],..}) "" tpTok
+  toks <- runParser satisfyQualifiedName (TermState {termStack=[],maybeTypeName=Nothing,..}) "" tpTok
   let (tp,_) = P.createQName package classMap imports toks
   let (nm,pos) = P.createName nmTok
-  params <- runParser parameter (TermState {termStack=[],..}) "" paramsToks
-  body <- runParser methodBody (TermState {termStack=[],..}) "" bodyToks
+  params <- runParser parameter (TermState {termStack=[],maybeTypeName=Nothing,..}) "" paramsToks
+  body <- runParser methodBody (TermState {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
   return (NewMethod pos nm params tp (createSignature nm params) (MethodImpl body))
 
 parseExtends :: (Stream s Identity TokenPos) => Parsec s TermState Extends
@@ -199,7 +199,7 @@ parseField = do
   return (tppos,tp,nmpos,nm)
 
 createSignature :: P.SimpleName -> [Parameter] -> Signature
-createSignature nm params = Signature nm (fmap (\(NewParameter _ tp _) -> L tp) params)
+createSignature nm params = Signature nm (fmap (\(NewParameter pos tp _) -> (tp,pos)) params)
 
 constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState (Maybe ConstructorInvocation, [Assignment])
 constructorBody = do
@@ -274,42 +274,81 @@ assignment :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Assig
 assignment = do
   variable <- term
   P.satisfy Assign
-  NewAssignment (getTermPosition variable) variable <$> term
+  t <- term
+  return $ NewAssignment (getTermPosition variable) variable (getTermPosition t) t
 
-data TermState = TermState {termStack :: [Term], package :: [T.Text], classMap :: Map.Map P.QualifiedName P.Clazz, imports :: P.NameToPackageMap, classpath :: ClassPath }
+data TermState = TermState {termStack :: [Term], maybeTypeName :: Maybe TypeName, package :: [T.Text], classMap :: Map.Map P.QualifiedName P.Clazz, imports :: P.NameToPackageMap, classpath :: ClassPath }
 
 term :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 term = do
-  castTerm <- optionMaybe $ try castTerm
-  case castTerm of
-    Just t -> return t
-    Nothing -> do
-      TermState {..} <- getState
-      maybeParens <- optionMaybe $ P.satisfy LParens
-      term' <- case maybeParens of
-        Just pos -> do
-          putState (TermState {termStack=[],..})
-          parensTerm <- term
-          P.satisfy RParens
-          putState (TermState {..})
-          return parensTerm
+  TermState {..} <- getState
+  maybeParens <- optionMaybe $ P.satisfy LParens
+  case maybeParens of
+    Just pos -> do
+      maybeTN <- optionMaybe $ try typeName
+      case maybeTN of
+        Just tn -> do
+          maybeRParens <- optionMaybe $ P.satisfy RParens
+          case maybeRParens of
+            Just _ -> Cast tn <$> term
+            Nothing ->
+              case maybeTypeName of
+                Just _ -> parserFail "Invalid double typeName"
+                Nothing -> do
+                  putState (TermState {maybeTypeName=Just tn,termStack=[],..})
+                  t <- term
+                  putState (TermState {maybeTypeName=Nothing,..})
+                  return t
         Nothing -> do
-          try integerLiteralTerm <|>
+          case maybeTypeName of
+            Just _ -> fail "Unconsumed type name"
+            Nothing -> do
+              putState (TermState {termStack=[],..})
+              t <- term
+              P.satisfy RParens
+              putState (TermState {..})
+              (terminator, _) <- lookAhead anyToken
+              case terminator of
+                  Dot -> do
+                    TermState {..} <- getState
+                    P.satisfy Dot
+                    putState (TermState {termStack=t:termStack,..})
+                    term
+                  _ -> return t
+    Nothing -> do
+      maybeTN <- optionMaybe $ try typeName
+      case maybeTN of
+        Just tn -> do
+          (terminator, _) <- lookAhead anyToken
+          case terminator of
+              Dot -> do
+                P.satisfy Dot
+                putState (TermState {maybeTypeName=Just tn,..})
+                try fieldAccessTerm <|> methodInvocationTerm
+              _ -> parserFail ""
+        Nothing -> do
+          t <- try integerLiteralTerm <|>
               try stringLiteralTerm <|>
               try booleanLiteralTerm <|>
               try objectCreationTerm <|>
+              try variableTerm <|>
               try variableThis <|>
-              try className <|>
               try fieldAccessTerm <|>
               try methodInvocationTerm
-      (terminator, _) <- lookAhead anyToken
-      case terminator of
-          Dot -> do
-            TermState {termStack=termStack',..} <- getState
-            P.satisfy Dot
-            putState (TermState {termStack=term':termStack',..})
-            term
-          _ -> return term'
+          (terminator, _) <- lookAhead anyToken
+          case terminator of
+              Dot -> do
+                TermState {..} <- getState
+                P.satisfy Dot
+                putState (TermState {termStack=t:termStack,..})
+                term
+              Question -> do
+                TermState {..} <- getState
+                P.satisfy Question
+                v1 <- term
+                P.satisfy Colon
+                Conditional t v1 <$> term
+              _ -> return t
 
 integerLiteralTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 integerLiteralTerm = do
@@ -329,13 +368,13 @@ booleanLiteralTerm = do
 objectCreationTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 objectCreationTerm = do
   TermState {..} <- getState
+  pos <- getPosition
   satisfyKeyword "new"
-  toks <- satisfyQualifiedName
-  let (clazz,pos) = P.createQName package classMap imports toks
+  tpName <- typeName
   P.satisfy LParens
   arguments <- argumentList
   P.satisfy RParens
-  return (Value (ObjectCreation pos clazz arguments))
+  return (Value (ObjectCreation pos tpName arguments))
 
 variableThis :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 variableThis = do
@@ -345,10 +384,14 @@ variableThis = do
 
 variableTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 variableTerm = do
-  tok <- P.satisfySimpleName
-  let (name,pos) = P.createName tok
-  lookAhead expressionTerminator
-  return (Value (Variable pos name))
+  TermState {..} <- getState
+  if null termStack && isNothing maybeTypeName
+    then do
+      tok <- P.satisfySimpleName
+      let (name,pos) = P.createName tok
+      lookAhead expressionTerminator
+      return (Value (Variable pos name))
+    else parserFail "No variable. Term stack is not empty or type name present."
 
 fieldAccessTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 fieldAccessTerm = do
@@ -356,11 +399,15 @@ fieldAccessTerm = do
   tok <- P.satisfySimpleName
   let (name,pos) = P.createName tok
   lookAhead expressionTerminator
-  case termStack of
-    [] -> return (Value (Variable pos name))
-    (t:ts) -> do
-      putState (TermState {termStack=ts,..})
-      return (Application t (FieldAccess pos name))
+  case maybeTypeName of
+    Just typeName@(TypeName pos tp) -> do
+      putState (TermState {maybeTypeName=Nothing,..})
+      return (StaticApplication typeName (FieldAccess pos name))
+    Nothing -> case termStack of
+      [] -> parserFail "Invalid field access application"
+      (t:ts) -> do
+        putState (TermState {termStack=ts,..})
+        return (Application t (FieldAccess pos name))
 
 methodInvocationTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 methodInvocationTerm = do
@@ -368,45 +415,51 @@ methodInvocationTerm = do
   tok <- P.satisfySimpleName
   let (method,pos) = P.createName tok
   P.satisfy LParens
-  putState (TermState {termStack=[],..})
+  putState (TermState {termStack=[],maybeTypeName=Nothing,..})
   arguments <- argumentList
   putState (TermState {..})
   P.satisfy RParens
-  case termStack of
-    [] -> parserFail "Invalid method invocation application"
-    (typeNameTerm@(Value (TypeName _ tp)):ts) -> do
-      putState (TermState {termStack=ts,..})
-      return (Application typeNameTerm (MethodInvocation pos method arguments))
-    (t:ts) -> do
-      putState (TermState {termStack=ts,..})
-      return (Application t (MethodInvocation pos method arguments))
+  case maybeTypeName of
+    Just typeName@(TypeName pos tp) -> do
+      putState (TermState {maybeTypeName=Nothing,..})
+      return (StaticApplication typeName (MethodInvocation pos method arguments))
+    Nothing -> case termStack of
+      [] -> parserFail "Invalid method invocation application"
+      (t:ts) -> do
+        putState (TermState {termStack=ts,..})
+        return (Application t (MethodInvocation pos method arguments))
 
 castTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 castTerm = do
   TermState {..} <- getState
   pos <- P.satisfy LParens
-  toks <- satisfyQualifiedName
-  let (clazz,_) = P.createQName package classMap imports toks
+  tpName <- typeName
   P.satisfy RParens
-  Value . Cast pos clazz <$> term
+  Cast tpName <$> term
 
 expressionTerminator :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState SourcePos
-expressionTerminator = P.satisfy Dot <|> P.satisfy Comma <|> P.satisfy Semi <|> P.satisfy RParens <|> P.satisfy Assign
+expressionTerminator =  P.satisfy Dot
+                    <|> P.satisfy Comma
+                    <|> P.satisfy Semi
+                    <|> P.satisfy RParens
+                    <|> P.satisfy Assign
+                    <|> P.satisfy Question
+                    <|> P.satisfy Colon
 
-className :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
-className = do
+typeName :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState TypeName
+typeName = do
   TermState {..} <- getState
   tok <- P.satisfySimpleName
   let sn = P.deconstructSimpleName $ fst $ P.createName tok
   let (qn,pos) = P.createQName package classMap imports [tok]
   if isValidClass classMap classpath qn
     then do
-      lookAhead (try expressionTerminator)
-      return $ Value (TypeName pos qn)
-    else className' [tok] pos
+      lookAhead (try expressionTerminator <|> P.satisfy LParens)
+      return $ TypeName pos qn
+    else typeName' [tok] pos
 
-className' :: (Stream s Identity (Token, SourcePos)) => [TokenPos] -> SourcePos -> Parsec s TermState Term
-className' first pos = do
+typeName' :: (Stream s Identity (Token, SourcePos)) => [TokenPos] -> SourcePos -> Parsec s TermState TypeName
+typeName' first pos = do
   TermState {..} <- getState
   maybeDot <- optionMaybe (P.satisfy Dot)
   case maybeDot of
@@ -416,9 +469,9 @@ className' first pos = do
       let (qn,_) = P.createQName [] classMap imports (next:first)
       if isValidClass classMap classpath qn
         then do
-          lookAhead (try expressionTerminator)
-          return $ Value (TypeName pos qn)
-        else className' (next:first) pos
+          lookAhead (try expressionTerminator <|> P.satisfy LParens)
+          return $ TypeName pos qn
+        else typeName' (next:first) pos
     Nothing -> fail "Not a valid type"
 
 satisfyIde :: (Stream s Identity (Token, SourcePos)) => Parsec s u (T.Text, SourcePos)
