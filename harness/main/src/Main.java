@@ -3,7 +3,7 @@
 class Main {
     static Integer java = new Integer(5);
     public static void main(String[] args) {
-        A a = new A(new C());
+        A a = new A("Bob");
         System.out.println(a.getStr());
         System.out.println(a.addString(" Long"));
         System.out.println(a.addInt(3));
@@ -14,6 +14,8 @@ class Main {
         System.out.println(a.calcFloorDiv(4));
         System.out.println(a.getStringFromInt(4,2));
         System.out.println(a.paramTester("Ne", "Eq"));
+        System.out.println(a.lubTest());
+        System.out.println(a.getDefaultTZ());
     }
 
     Integer a;
@@ -22,6 +24,10 @@ class Main {
         this.a = Integer.valueOf(5);
     }
 
+    public Main(int i) {
+        this();
+        this.a = i;
+    }
     public void test() {
         doit((Object) a);
     }

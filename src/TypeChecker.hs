@@ -46,11 +46,6 @@ import qualified Data.Sequence.Internal.Sorting as P
 import Data.Maybe (mapMaybe)
 import Data.Int (Int32)
 import Parser2
-import qualified Parser2 as P2
-import TypeInfo (getUnboxedType)
-import qualified Parser as P
-import qualified Parser2 as P2
-import qualified Parser2 as P2
 
 type ClassData = (ClassPath,LocalClasses)
 
@@ -82,15 +77,17 @@ data TypedMethod = NewTypedMethod P.SimpleName [Parameter] P.QualifiedName Typed
 
 data TypedClazz = NewTypedClazz P.QualifiedName Extends [Field] [TypedMethod]
 
-data TypedMethodImplementation = TypedMethodImpl TypedTerm | TypedConstructorImpl TypedConstructorInvocation [TypedAssignment] deriving Show
+data TypedMethodImplementation = TypedMethodImpl TypedTerm 
+                               | TypedConstructorImpl TypedConstructorInvocation [TypedAssignment] 
+                               deriving Show
 
 init' = T.pack "<init>"
 
 getTypedTermType :: TypedTerm -> TI.Type
 getTypedTermType (TypedValue TypedVariable {vTyp=tp}) = tp
-getTypedTermType (TypedValue TypedIntegerLiteral {}) = TI.L P.createQNameInteger P2.CompiledCode
-getTypedTermType (TypedValue TypedStringLiteral {}) = TI.L P.createQNameString P2.CompiledCode
-getTypedTermType (TypedValue TypedBooleanLiteral {}) = TI.L P.createQNameBoolean P2.CompiledCode
+getTypedTermType (TypedValue TypedIntegerLiteral {}) = TI.L P.createQNameInteger CompiledCode
+getTypedTermType (TypedValue TypedStringLiteral {}) = TI.L P.createQNameString CompiledCode
+getTypedTermType (TypedValue TypedBooleanLiteral {}) = TI.L P.createQNameBoolean CompiledCode
 getTypedTermType (TypedValue TypedObjectCreation {ocTyp=tp}) = TI.L tp CompiledCode
 getTypedTermType (TypedApplication _ TypedFieldAccess {fTyp=tp}) = tp
 getTypedTermType (TypedApplication _ TypedMethodInvocation {mTyp=tp}) = tp
@@ -225,15 +222,15 @@ getType (Conditional b1 t1 t2) = do
   term1 <- getType t1
   term2 <- getType t2
   if not (TI.isTypeBoolean (TI.getUnboxedType (getTypedTermType booleanExpr)))
-    then lift $ throwE [TypeError "First term in conditional is not boolean" (SourcePos' (P2.getTermPosition b1))]
+    then lift $ throwE [TypeError "First term in conditional is not boolean" (SourcePos' (getTermPosition b1))]
     else do
       case (getTypedTermType term1, getTypedTermType term2) of
         (tp@(TI.L qn1 _),TI.L qn2 _) | qn1 == qn2 -> return $ TypedConditional booleanExpr term1 term2 tp
-        (t1, t2) | TI.isTypeBoolean (getUnboxedType t1)
-                && TI.isTypeBoolean (getUnboxedType t2) ->
+        (t1, t2) | TI.isTypeBoolean (TI.getUnboxedType t1)
+                && TI.isTypeBoolean (TI.getUnboxedType t2) ->
                    return $ TypedConditional booleanExpr term1 term2 (TI.Z CompiledCode)
-        (t1, t2) | TI.isTypeInteger (getUnboxedType t1)
-                && TI.isTypeInteger (getUnboxedType t2) ->
+        (t1, t2) | TI.isTypeInteger (TI.getUnboxedType t1)
+                && TI.isTypeInteger (TI.getUnboxedType t2) ->
                    return $ TypedConditional booleanExpr term1 term2 (TI.I CompiledCode)
         (t1, t2) -> do
           lub <- lift $ leastUpperBound [fst (TI.getBoxedType t1), fst (TI.getBoxedType t2)]
@@ -241,7 +238,7 @@ getType (Conditional b1 t1 t2) = do
         {--_ -> lift $ throwE [TypeError "Second and third terms in conditional are different types" (SourcePos' (P2.getTermPosition t2))]--}
 
 
-getFieldType :: P.SimpleName -> TI.TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) (Maybe TI.Type)
+getFieldType :: P.SimpleName -> TI.TypeInfo -> ExceptT [TypeError] (StateT ClassData IO) (Maybe TI.Type)
 getFieldType nm tp = do
   typeData <- lift get
   let maybeFieldType = TI.getFieldType tp nm
@@ -256,7 +253,7 @@ getFieldType nm tp = do
             parentType <- TI.getClassTypeInfoE parentName
             getFieldType nm parentType
 
-getMethodType :: TI.ClassPathSignature -> TI.TypeInfo -> ExceptT [P2.TypeError] (StateT ClassData IO) (Maybe TI.MethodInvocation)
+getMethodType :: TI.ClassPathSignature -> TI.TypeInfo -> ExceptT [TypeError] (StateT ClassData IO) (Maybe TI.MethodInvocation)
 getMethodType signature tp = do
   typeData <- lift get
   maybeMethodType <- TI.getMethodType tp signature
@@ -333,7 +330,7 @@ getMethodParamDeclaredTypeErrors (NewMethod _ _ params _ _ _) =
 getMethodExpressionDeclaredTypeErrors :: Method -> StateT ClassData IO [TypeError]
 getMethodExpressionDeclaredTypeErrors (NewMethod _ _ _ _ _ (MethodImpl term)) =
   getTermDeclaredTypeErrors term
-getMethodExpressionDeclaredTypeErrors (NewMethod _ _ _ _ _ (ConstructorImpl maybeConstructorInvocation assignments)) =
+getMethodExpressionDeclaredTypeErrors (NewMethod _ _ _ _ _ (ConstructorImpl _ assignments)) =
   getAssignmentsDeclaredTypeErrors assignments
 
 getParamDeclaredTypeErrors :: [Parameter] -> StateT ClassData IO [TypeError]
@@ -409,15 +406,22 @@ getMethodTermTypeErrors cls@(NewClazz2 _ _ _ extends _ _) method@(NewMethod pos 
   typeData <- lift get
   let constructorRightEnvironment = createConstructorEnvironmentRight typeData cls method
   let constructorLeftEnvironment = createConstructorEnvironmentLeft typeData cls
-  maybeTypedConstructorInvocation <- case maybeConstructorInvocation of
-    Just ci -> do
-      typedCI <- runReaderT (getTypedConstructorInvocation cls ci) constructorRightEnvironment
-      return $ Just typedCI
+  maybeEitherTypedConstructorInvocation <- case maybeConstructorInvocation of
+    Just ci -> case ci of
+      Left thisCI -> do
+        typedCI <- runReaderT (getTypedConstructorInvocation cls thisCI) constructorRightEnvironment
+        return $ Just (Left typedCI)
+      Right superCI -> do
+        typedCI <- runReaderT (getTypedSuperConstructorInvocation cls superCI) constructorRightEnvironment
+        return $ Just (Right typedCI)
     Nothing -> return Nothing
   typedAssignments <- mapM (getAssignmentTypeError constructorLeftEnvironment constructorRightEnvironment) assignments
-  case maybeTypedConstructorInvocation of
-    Just typedCI ->
-      return $ NewTypedMethod P.createNameInit params P.createQNameObject (TypedConstructorImpl typedCI typedAssignments)
+  case maybeEitherTypedConstructorInvocation of
+    Just eitherTypedCI -> case eitherTypedCI of  
+      Left typedThisCI -> 
+        return $ NewTypedMethod P.createNameInit params P.createQNameObject (TypedConstructorImpl typedThisCI typedAssignments)
+      Right typedSuperCI ->
+        return $ NewTypedMethod P.createNameInit params P.createQNameObject (TypedConstructorImpl typedSuperCI typedAssignments)
     Nothing ->
       return $ case extends of
         NewExtends _ qn -> NewTypedMethod
@@ -452,7 +456,19 @@ isTermValidForLeftAssignment (Application t (FieldAccess _ _)) = isTermValidForL
 isTermValidForLeftAssignment t = False
 
 getTypedConstructorInvocation ::  Clazz2 -> ConstructorInvocation -> ReaderT Environment (ExceptT [TypeError] (StateT ClassData IO)) TypedConstructorInvocation
-getTypedConstructorInvocation  cls@(NewClazz2 _ _ tp extends _ _) (NewConstructorInvocation pos terms) = do
+getTypedConstructorInvocation  cls@(NewClazz2 cpos _ tp extends _ _) (NewConstructorInvocation pos terms) = do
+  constructorSuperInvocationEnvironment <- ask
+  typedTerms <- mapM getType terms
+  let signature = TI.ClassPathSignature init' (fmap getTypedTermType typedTerms)
+  typeInfo <- lift $ TI.getClassTypeInfoE (tp,SourcePos' cpos)
+  maybeThisConstructor <- lift $ getMethodType signature typeInfo
+  case maybeThisConstructor of
+    Nothing -> lift $ throwE [TypeError ("No invocation compatible constructor: "++show tp++"."++show signature) (SourcePos' pos)]
+    Just (TI.NewMethodInvocation _ (TI.ClassPathSignature _ targetTermTypes)) ->
+      return $ NewTypedConstructorInvocation tp targetTermTypes typedTerms
+
+getTypedSuperConstructorInvocation ::  Clazz2 -> SuperConstructorInvocation -> ReaderT Environment (ExceptT [TypeError] (StateT ClassData IO)) TypedConstructorInvocation
+getTypedSuperConstructorInvocation  cls@(NewClazz2 _ _ tp extends _ _) (NewSuperConstructorInvocation pos terms) = do
   constructorSuperInvocationEnvironment <- ask
   typedTerms <- mapM getType terms
   let signature = TI.ClassPathSignature init' (fmap getTypedTermType typedTerms)
@@ -490,9 +506,9 @@ leastUpperBound typeList = do
   let ec = List.nub (List.foldl' List.intersect [] st)
   maybeLub <-foldM (\mec tp -> case mec of
                             Nothing -> return $ Just tp
-                            Just tp' -> ifM (TI.isSubtypeOfE (tp,P2.CompiledCode) (tp',P2.CompiledCode)) (return (Just tp)) (return (Just tp')))
+                            Just tp' -> ifM (TI.isSubtypeOfE (tp,CompiledCode) (tp',CompiledCode)) (return (Just tp)) (return (Just tp')))
     Nothing
     ec
   case maybeLub of
-    Nothing -> return $ TI.L P.createQNameObject P2.CompiledCode
-    Just lub -> return $ TI.L lub P2.CompiledCode
+    Nothing -> return $ TI.L P.createQNameObject CompiledCode
+    Just lub -> return $ TI.L lub CompiledCode

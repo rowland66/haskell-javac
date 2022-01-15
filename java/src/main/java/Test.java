@@ -20,12 +20,17 @@ class Pair extends java.lang.Object {
 
 class B extends A {
 
-  B(C param) {
-    super(param);
+  B() {
+    super();
+  }
+
+  String toString() {
+    return "I'm a B";
   }
 }
 
-class C extends java.lang.Object {
+class C extends A {
   C() {
-    super(); }
+    super();
   }
+}

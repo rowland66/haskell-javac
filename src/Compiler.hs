@@ -3,7 +3,7 @@ module Compiler (
 ) where
 
 import qualified Data.Map.Strict as Map
-import Control.Monad (foldM,forM_)
+import Control.Monad (foldM,forM_, when)
 import Control.Monad.Trans.State.Strict ( StateT(runStateT) )
 import Text.Parsec.Error (newErrorMessage, Message(Message))
 import Lexer
@@ -34,7 +34,7 @@ compile = do
 compile' :: OptionMap -> ClassPath -> NameToPackageMap -> [FilePath] -> IO ()
 compile' optionMap cp defaultNameMapping srcFiles = do
   print "Lexing and Parsing..."
-  lexAndParseResult <- 
+  lexAndParseResult <-
     foldM (\m file -> fmap (\eitherList -> (++) <$> eitherList <*> m) (lexAndParse optionMap defaultNameMapping file)) (Right []) srcFiles
   let parserResult = lexAndParseResult >>= parseClasses2
   case parserResult of
@@ -43,7 +43,7 @@ compile' optionMap cp defaultNameMapping srcFiles = do
       print "Type Checking..."
       (eTypedClazzes, typeData) <- runStateT (typeCheck >> transform) (cp,ast)
       case eTypedClazzes of
-        Left errorList -> displayTypeErrors errorList >> print ast
+        Left errorList -> displayTypeErrors errorList >> Control.Monad.when (Map.member "-v" optionMap) (print ast)
         Right typedClazzes -> do
           print "Writing Classes..."
           forM_ typedClazzes (writeClass (optionMap Map.! "-d"))
@@ -61,18 +61,25 @@ getCommandLineOptions args =
                                     if not (null option) then
                                       ("", Map.insert option arg optionMap, fileGlobs)
                                     else
-                                      if isCommandLineOption arg then
+                                      if isCommandLineOption2 arg then
                                         (arg, optionMap, fileGlobs)
                                       else
-                                        ("", optionMap, arg:fileGlobs)
+                                        if isCommandLineOption1 arg then
+                                          ("", Map.insert arg arg optionMap, fileGlobs)
+                                        else
+                                          ("", optionMap, arg:fileGlobs)
                                   ) ("", Map.empty, []) args
   in
     (addDefaultOutput optionMap, fileGlobs)
 
-isCommandLineOption :: String -> Bool
-isCommandLineOption "-d" = True
-isCommandLineOption "-cp" = True
-isCommandLineOption _ = False
+isCommandLineOption2 :: String -> Bool
+isCommandLineOption2 "-d" = True
+isCommandLineOption2 "-cp" = True
+isCommandLineOption2 _ = False
+
+isCommandLineOption1 :: String -> Bool
+isCommandLineOption1 "-v" = True
+isCommandLineOption1 _ = False
 
 addDefaultOutput :: OptionMap -> OptionMap
 addDefaultOutput mp =

@@ -101,11 +101,11 @@ buildMethodCodeAttrInfo (NewTypedMethod _ params returnType (TypedMethodImpl ter
     (fromIntegral (length params) :: Word16)
     (B.concat (reverse codeBytes))
     stackMapBytes
-buildMethodCodeAttrInfo (NewTypedMethod _ params _ (TypedConstructorImpl (NewTypedConstructorInvocation cls targetTermTypes superTerms) assignments)) = do
-  (superInvocationCodeByteChunks, superInvocationMaxStack) <- generateSuperInvocation cls (zip targetTermTypes superTerms)
+buildMethodCodeAttrInfo (NewTypedMethod _ params _ (TypedConstructorImpl (NewTypedConstructorInvocation cls targetTermTypes terms) assignments)) = do
+  (constructorInvocationCodeByteChunks, superInvocationMaxStack) <- generateConstructorInvocation cls (zip targetTermTypes terms)
   (assignmentCodeByteChunksList, assignmentMaxStack) <- foldM (\(list,ms) a -> fmap (\(c, ms') -> (c:list, max ms ms')) (generateAssignmentCode a)) ([],0) assignments
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  let codeByteChunks = concat $ superInvocationCodeByteChunks : reverse assignmentCodeByteChunksList
+  let codeByteChunks = concat $ assignmentCodeByteChunksList++[constructorInvocationCodeByteChunks]
   let completeByteCodeChunks = ConstantByteCodeChunk (toLazyByteString (word8 0xb1)) pendingStackMapFrame:codeByteChunks
   stackMapBytes <- lift $ generateStackMapTable completeByteCodeChunks
   let codeBytes = transformRelativeOffsets completeByteCodeChunks
@@ -180,13 +180,15 @@ generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
   modify (\MethodState {..} -> MethodState {stackTypes=L P.createQNameBoolean P2.CompiledCode : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedObjectCreation {ocTyp=tp, ocParamTyps=targetParamTypes, ocTerms=terms}) = do
+  pendingStackMapFrame <- getPossiblePendingStackFrame
   classNdx <- lift $ addClass tp
   (constructorTerms, maxStack) <- generateTermListCode (zip targetParamTypes terms)
+  pendingParametersStackMapFrame <- getPossiblePendingStackFrame
   modify (\MethodState {..} -> MethodState {stackTypes=drop (length targetParamTypes) stackTypes,..})
   constructorMethodRef <- lift $ addMethodRef tp P.createNameInit (fmap getTypedTermType terms) "V"
-  let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 0xb7 <> word16BE constructorMethodRef)) Nothing]++
+  let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 0xb7 <> word16BE constructorMethodRef)) pendingParametersStackMapFrame]++
                  constructorTerms++
-                 [ConstantByteCodeChunk (toLazyByteString (word8 0xbb <> word16BE classNdx <> word8 0x59)) Nothing]
+                 [ConstantByteCodeChunk (toLazyByteString (word8 0xbb <> word16BE classNdx <> word8 0x59)) pendingStackMapFrame]
   modify (\MethodState {..} -> MethodState {stackTypes=L tp P2.CompiledCode:stackTypes,..})
   return (byteCode, maxStack+2) {--Add 2 for the new object ref and the duplicate -}
 generateTermCode' (TypedCast (TypedReferenceTerm tp term)) = do
@@ -227,6 +229,7 @@ generateTermCode' (TypedStaticApplication (TypeName _ tnQn) TypedMethodInvocatio
 generateTermCode' (TypedConditional booleanTerm thenTerm elseTerm tp) = do
   MethodState {stackTypes=originalStackTypes,..} <- get
   (booleanTermCode, booleanMaxStack) <- generateTermCode booleanTerm
+  booleanTermConversionCode <- generateTermConversionByteCode booleanTerm (Z CompiledCode)
   modify (\MethodState {..} -> MethodState {stackTypes=originalStackTypes,pendingStackMapFrame=Nothing,..})
   (thenTermCode, thenMaxStack) <- generateTermCode thenTerm
   thenTermConversionCode <- generateTermConversionByteCode thenTerm tp
@@ -238,12 +241,12 @@ generateTermCode' (TypedConditional booleanTerm thenTerm elseTerm tp) = do
   let remainderTermStackMapFrame = addStackMapFrame initialStackMapFrame stackTypes
   modify (\MethodState {..} -> MethodState {pendingStackMapFrame=Just remainderTermStackMapFrame,..})
   let byteCode = elseTermConversionCode++elseTermCode++
-          [ConstantByteCodeChunk (toLazyByteString (word8 0xC8 <> 
+          [ConstantByteCodeChunk (toLazyByteString (word8 0xC8 <>
             word32BE (fromIntegral (chunkListBytes (elseTermConversionCode++elseTermCode)+5)))) Nothing]++ -- goto_w
           thenTermConversionCode++thenTermCode++
-          [ConstantByteCodeChunk (toLazyByteString (word8 0x99 <> 
+          [ConstantByteCodeChunk (toLazyByteString (word8 0x99 <>
             word16BE (fromIntegral (chunkListBytes (thenTermConversionCode++thenTermCode)+3+5)))) Nothing]++ -- if<cond>
-          booleanTermCode
+          booleanTermConversionCode++booleanTermCode
   return (byteCode, max booleanMaxStack (max thenMaxStack elseMaxStack))
 
 generateTermListCode :: [(Type,TypedTerm)] -> MethodST ([ByteCodeChunk], Word16)
@@ -259,11 +262,11 @@ generateTermListCode' b startStack maxStack ((p,t):ps) = do
   conversionByteCode <- generateTermConversionByteCode t p
   generateTermListCode' (conversionByteCode++termByteCode++b) (startStack+1) (max maxStack (maxStack' + startStack)) ps
 
-generateSuperInvocation :: P.QualifiedName -> [(Type,TypedTerm)] -> MethodST ([ByteCodeChunk], Word16)
-generateSuperInvocation parentCls terms = do
+generateConstructorInvocation :: P.QualifiedName -> [(Type,TypedTerm)] -> MethodST ([ByteCodeChunk], Word16)
+generateConstructorInvocation cls terms = do
   (invocationTerms, maxStack) <- generateTermListCode terms
   let tps = fmap fst terms
-  methodRef <- lift $ addMethodRef parentCls P.createNameInit tps "V"
+  methodRef <- lift $ addMethodRef cls P.createNameInit tps "V"
   let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 0xb7 <> word16BE methodRef)) Nothing]++
                  invocationTerms++
                  [ConstantByteCodeChunk (toLazyByteString (word8 0x2a)) Nothing]
@@ -274,7 +277,7 @@ generateTermConversionByteCode :: TypedTerm -> Type -> MethodST [ByteCodeChunk]
 generateTermConversionByteCode typedTerm tp = do
   case getTypedTermType typedTerm of
     I _ -> case tp of
-      (L qn _) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode qn  
+      (L qn _) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode qn
       _        -> return [ConstantByteCodeChunk B.empty Nothing]
     Z _ -> case tp of
       (L qn _) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode qn

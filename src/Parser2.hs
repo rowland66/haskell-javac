@@ -8,6 +8,7 @@ module Parser2
   , Term(..)
   , Extends(..)
   , ConstructorInvocation(..)
+  , SuperConstructorInvocation(..)
   , Assignment(..)
   , Signature(..)
   , Parameter(..)
@@ -92,6 +93,8 @@ data Extends = NewExtends SourcePos P.QualifiedName | ExtendsObject
 
 data ConstructorInvocation = NewConstructorInvocation SourcePos [Term] deriving Show
 
+data SuperConstructorInvocation = NewSuperConstructorInvocation SourcePos [Term] deriving Show
+
 data Assignment = NewAssignment SourcePos Term SourcePos Term deriving Show
 
 data Signature = Signature P.SimpleName [(P.QualifiedName,SourcePos)]
@@ -104,7 +107,7 @@ data Method = NewMethod SourcePos P.SimpleName [Parameter] P.QualifiedName Signa
 
 data Clazz2 = NewClazz2 SourcePos P.CompilationUnit P.QualifiedName Extends [Field] [Method]
 
-data MethodImplementation = MethodImpl Term | ConstructorImpl (Maybe ConstructorInvocation) [Assignment]
+data MethodImplementation = MethodImpl Term | ConstructorImpl (Maybe (Either ConstructorInvocation SuperConstructorInvocation)) [Assignment]
 
 instance Show SourcePos' where
   show (SourcePos' pos) = show pos
@@ -170,8 +173,8 @@ mapField P.CompilationUnit {..} classMap (P.NewField toks) = do
 mapConstructor :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Constructor -> Either ParseError Method
 mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks (P.NewBody bodyToks)) = do
   params <- runParser parameter (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" toks
-  (super, assignments) <- runParser constructorBody (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
-  return (NewMethod pos P.createNameInit params P.createQNameObject (createSignature P.createNameInit params) (ConstructorImpl super assignments))
+  (constructorInv, assignments) <- runParser constructorBody (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
+  return (NewMethod pos P.createNameInit params P.createQNameObject (createSignature P.createNameInit params) (ConstructorImpl constructorInv assignments))
 
 mapMethod :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Method -> Either ParseError Method
 mapMethod P.CompilationUnit {..} classMap (P.NewMethod tpTok nmTok paramsToks (P.NewBody bodyToks)) = do
@@ -201,20 +204,36 @@ parseField = do
 createSignature :: P.SimpleName -> [Parameter] -> Signature
 createSignature nm params = Signature nm (fmap (\(NewParameter pos tp _) -> (tp,pos)) params)
 
-constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState (Maybe ConstructorInvocation, [Assignment])
+constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState (Maybe (Either ConstructorInvocation SuperConstructorInvocation), [Assignment])
 constructorBody = do
-  maybeSuper <- optionMaybe (try constructorInvocation)
+  maybeSuper <- optionMaybe (try superConstructorInvocation)
+  maybeThis <- optionMaybe (try constructorInvocation)
   assignments <- assignmentList
-  return (maybeSuper, assignments)
+  case maybeSuper of
+    Nothing -> case maybeThis of
+      Nothing -> return (Nothing, assignments)
+      Just ci -> return (Just (Left ci), assignments)
+    Just sci -> case maybeThis of
+      Nothing -> return (Just (Right sci), assignments)
+      Just ci -> parserFail "this and super not allowed in same constructor"
 
 constructorInvocation :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState ConstructorInvocation
 constructorInvocation = do
-  pos <- satisfyKeyword "super"
+  pos <- satisfyKeyword "this"
   P.satisfy LParens
   arguments <- argumentList
   P.satisfy RParens
   P.satisfy Semi
   return (NewConstructorInvocation pos arguments)
+
+superConstructorInvocation :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState SuperConstructorInvocation
+superConstructorInvocation = do
+  pos <- satisfyKeyword "super"
+  P.satisfy LParens
+  arguments <- argumentList
+  P.satisfy RParens
+  P.satisfy Semi
+  return (NewSuperConstructorInvocation pos arguments)
 
 methodBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 methodBody = do
@@ -317,7 +336,7 @@ term = do
                   _ -> return t
     Nothing -> do
       maybeTN <- optionMaybe $ try typeName
-      case maybeTN of
+      t <- case maybeTN of
         Just tn -> do
           (terminator, _) <- lookAhead anyToken
           case terminator of
@@ -327,28 +346,28 @@ term = do
                 try fieldAccessTerm <|> methodInvocationTerm
               _ -> parserFail ""
         Nothing -> do
-          t <- try integerLiteralTerm <|>
-              try stringLiteralTerm <|>
-              try booleanLiteralTerm <|>
-              try objectCreationTerm <|>
-              try variableTerm <|>
-              try variableThis <|>
-              try fieldAccessTerm <|>
-              try methodInvocationTerm
-          (terminator, _) <- lookAhead anyToken
-          case terminator of
-              Dot -> do
-                TermState {..} <- getState
-                P.satisfy Dot
-                putState (TermState {termStack=t:termStack,..})
-                term
-              Question -> do
-                TermState {..} <- getState
-                P.satisfy Question
-                v1 <- term
-                P.satisfy Colon
-                Conditional t v1 <$> term
-              _ -> return t
+          try integerLiteralTerm <|>
+            try stringLiteralTerm <|>
+            try booleanLiteralTerm <|>
+            try objectCreationTerm <|>
+            try variableTerm <|>
+            try variableThis <|>
+            try fieldAccessTerm <|>
+            try methodInvocationTerm
+      (terminator, _) <- lookAhead anyToken
+      case terminator of
+          Dot -> do
+            TermState {..} <- getState
+            P.satisfy Dot
+            putState (TermState {termStack=t:termStack,..})
+            term
+          Question -> do
+            TermState {..} <- getState
+            P.satisfy Question
+            v1 <- term
+            P.satisfy Colon
+            Conditional t v1 <$> term
+          _ -> return t
 
 integerLiteralTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 integerLiteralTerm = do

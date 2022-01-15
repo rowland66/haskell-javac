@@ -1,6 +1,7 @@
 package org.rowland;
 
 import java.util.Vector;
+import java.util.TimeZone;
 
 class A extends Object {
   String foo;
@@ -9,7 +10,7 @@ class A extends Object {
   Boolean b;
   Vector v;
 
-  A(C initFoo) {
+  A() {
     super();
     this.foo = "Rowland";
     this.foo2 = "Smit";
@@ -18,8 +19,13 @@ class A extends Object {
     this.v = new Vector();
   }
 
+  A(String f) {
+    this();
+    this.foo = f;
+  }
+
   Pair test(B foo, Pair bar) {
-    return new Pair(foo, new A(new C()));
+    return new Pair(foo, new A());
   }
 
   Integer getInt() {
@@ -50,7 +56,7 @@ class A extends Object {
   }
 
   Integer getCodePoint() {
-    return this.foo.codePointAt(this.foo2.length());
+    return this.foo.codePointAt(Math.min(Math.subtractExact(this.foo2.length(),1),Math.subtractExact(this.foo.length(),1)));
   }
 
   Integer calcFloorDiv(Integer a) {
@@ -66,4 +72,11 @@ class A extends Object {
     return this.getStringFromInt(a.equals("Ne") ? Integer.sum(4,2) : 2, b.equals("Ne") ? 3 : 1);
   }
 
+  Object lubTest() {
+    return (this.b ? new B() : new C());
+  }
+
+  String getDefaultTZ() {
+    return TimeZone.getDefault().getDisplayName();
+  }
 }
