@@ -9,6 +9,7 @@ module Parser2
   , Extends(..)
   , ConstructorInvocation(..)
   , SuperConstructorInvocation(..)
+  , ApplicationTarget(..)
   , Assignment(..)
   , Signature(..)
   , Parameter(..)
@@ -16,13 +17,12 @@ module Parser2
   , Method(..)
   , MethodImplementation(..)
   , Clazz2(..)
-  , SourcePos'(..)
   , TypeName(..)
   , TypeError(..) -- defined here to be shared by TypeInfo and TypeChecker
-  , getClazz2Name
   , LocalClasses
-  , isValidClass
   , getTermPosition
+  , MethodAccessFlag
+  , ClassAccessFlag
   ) where
 
 import TextShow
@@ -46,9 +46,11 @@ import Control.Monad.Extra (ifM)
 import Parser (NameToPackageMap)
 import qualified Text.Read.Lex as L
 import Text.ParserCombinators.ReadPrec
+import TypeCheckerTypes
 
 data Abstraction = FieldAccess SourcePos P.SimpleName
                  | MethodInvocation SourcePos P.SimpleName [Term]
+                 | SuperMethodInvocation SourcePos P.SimpleName [Term]
                  deriving Show
 
 data TypeName = TypeName SourcePos P.QualifiedName deriving Show
@@ -60,16 +62,19 @@ data Value = Variable SourcePos P.SimpleName
            | ObjectCreation SourcePos TypeName [Term]
            deriving Show
 
+data ApplicationTarget = ApplicationTargetTerm Term
+                       | ApplicationTargetTypeName TypeName
+                       deriving Show
+
 data Term = Value Value
-          | Application Term Abstraction
-          | StaticApplication TypeName Abstraction
+          | Application ApplicationTarget Abstraction
           | Conditional Term Term Term
           | Cast TypeName Term
           deriving Show
 
 type ClassData = (ClassPath,LocalClasses)
 
-data TypeError = TypeError String SourcePos'
+data TypeError = TypeError String SourcePos
 
 instance Show TypeError where
   show (TypeError str pos) = str ++ "\nat: " ++ show pos
@@ -81,13 +86,11 @@ getTermPosition (Value (StringLit pos _)) = pos
 getTermPosition (Value (BooleanLit pos _)) = pos
 getTermPosition (Value (ObjectCreation pos _ _)) = pos
 getTermPosition (Cast (TypeName pos _) _) = pos
-getTermPosition (Application t _) = getTermPosition t
-getTermPosition (StaticApplication (TypeName pos _) _) = pos
+getTermPosition (Application (ApplicationTargetTerm t) _) = getTermPosition t
+getTermPosition (Application (ApplicationTargetTypeName (TypeName pos _)) _) = pos
 getTermPosition (Conditional t _ _) = getTermPosition t
 
 type LocalClasses = Map.Map P.QualifiedName Clazz2
-
-data SourcePos' = SourcePos' SourcePos | CompiledCode
 
 data Extends = NewExtends SourcePos P.QualifiedName | ExtendsObject
 
@@ -99,23 +102,19 @@ data Assignment = NewAssignment SourcePos Term SourcePos Term deriving Show
 
 data Signature = Signature P.SimpleName [(P.QualifiedName,SourcePos)]
 
-data Parameter = NewParameter SourcePos P.QualifiedName P.SimpleName deriving Show
+data Parameter = NewParameter SourcePos P.QualifiedName SourcePos P.SimpleName deriving Show
 
 data Field = NewField SourcePos P.QualifiedName  SourcePos P.SimpleName
 
-data Method = NewMethod SourcePos P.SimpleName [Parameter] P.QualifiedName Signature MethodImplementation
+data Method = NewMethod SourcePos [P.MethodAccessFlag] P.SimpleName [Parameter] P.QualifiedName Signature (Maybe MethodImplementation)
 
-data Clazz2 = NewClazz2 SourcePos P.CompilationUnit P.QualifiedName Extends [Field] [Method]
+data Clazz2 = NewClazz2 SourcePos P.CompilationUnit [P.ClassAccessFlag] P.QualifiedName Extends [Field] [Method]
 
-data MethodImplementation = MethodImpl Term | ConstructorImpl (Maybe (Either ConstructorInvocation SuperConstructorInvocation)) [Assignment]
-
-instance Show SourcePos' where
-  show (SourcePos' pos) = show pos
-  show CompiledCode = "Compiled Code"
+data MethodImplementation = MethodImpl Term | ConstructorImpl (Either ConstructorInvocation SuperConstructorInvocation) [Assignment]
 
 {-- Parameters are equal if their types are equal. This is convenient in some cases, but might cause problems in others -}
 instance Eq Parameter where
-  (==) (NewParameter _ tp1 _) (NewParameter _ tp2 _) = tp1 == tp2
+  (==) (NewParameter _ tp1 _ _) (NewParameter _ tp2 _ _) = tp1 == tp2
 
 instance Show Signature where
   show (Signature nm types) = P.simpleNameToString nm ++ "(" ++ concatMap show types ++ ")"
@@ -130,36 +129,36 @@ instance Show Field where
   show (NewField _ tp _ nm) = show tp ++ " " ++ show nm ++ ";"
 
 instance Show Method where
-  show (NewMethod _ _ _ _ sig (MethodImpl term)) = show sig++"\n"++show term
-  show (NewMethod _ _ _ _ sig (ConstructorImpl _ assignments)) = show sig++"\n"++foldr (\a str -> str++"\n"++show a) "" assignments
+  show (NewMethod _ _ _ _ _ sig (Just (MethodImpl term))) = show sig++"\n"++show term
+  show (NewMethod _ _ _ _ _ sig (Just (ConstructorImpl _ assignments))) = show sig++"\n"++foldr (\a str -> str++"\n"++show a) "" assignments
+  show (NewMethod _ _ _ _ _ sig Nothing) = show sig
 
 instance Show Extends where
   show (NewExtends _ qName) = "extends " ++ show qName
   show ExtendsObject = "extends /java/lang/Object"
 
 instance Show Clazz2 where
-  show (NewClazz2 _ _ nm extends fields methods) =
-    "class " ++ show nm ++ " " ++ show extends ++ "\n" ++
+  show (NewClazz2 _ _ af nm extends fields methods) =
+    abs++"class "++show nm++" "++show extends++"\n"++
       foldr (\f str -> show f++"\n"++str) "" fields ++
       foldr (\c str -> show c++"\n"++str) "" methods
-
-getClazz2Name :: Clazz2 -> P.QualifiedName
-getClazz2Name (NewClazz2 _ _ nm _ _ _) = nm
+    where
+      abs = if P.CAbstract `elem` af then "abstract " else ""
 
 parseClasses2 :: [P.Clazz] -> Either ParseError (Map.Map P.QualifiedName Clazz2)
 parseClasses2 clazzList = do
-  let pairsList = fmap (\cls@(P.NewClazz _ _ nm _ _ _ _) -> (nm, cls)) clazzList
+  let pairsList = fmap (\cls@(P.NewClazz _ _ nm _ _ _ _ _) -> (nm, cls)) clazzList
   let clazzMap = Map.fromList pairsList
   mapM (mapClazz clazzMap) clazzMap
 
 
 mapClazz :: Map.Map P.QualifiedName P.Clazz -> P.Clazz -> Either ParseError Clazz2
-mapClazz classMap (P.NewClazz pos cu name maybeExtends fields constructors methods) = do
+mapClazz classMap (P.NewClazz pos cu name af maybeExtends fields constructors methods) = do
   e <- case maybeExtends of Just tok -> mapExtends cu classMap tok; Nothing -> Right ExtendsObject;
   c <- mapM (mapConstructor cu classMap) constructors
   f <- mapM (mapField cu classMap) fields
   m <- mapM (mapMethod cu classMap) methods
-  return (NewClazz2 pos cu name e f (c++m))
+  return (NewClazz2 pos cu af name e f (c++m))
 
 mapExtends :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> [TokenPos] -> Either ParseError Extends
 mapExtends P.CompilationUnit {..} classMap =
@@ -174,18 +173,30 @@ mapConstructor :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Cons
 mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks (P.NewBody bodyToks)) = do
   params <- runParser parameter (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" toks
   (constructorInv, assignments) <- runParser constructorBody (TermState  {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
-  return (NewMethod pos P.createNameInit params P.createQNameObject (createSignature P.createNameInit params) (ConstructorImpl constructorInv assignments))
+  return (NewMethod pos
+                    []
+                    P.createNameInit
+                    params
+                    P.createQNameObject
+                    (createSignature P.createNameInit params)
+                    (Just (ConstructorImpl constructorInv assignments)))
+mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks P.EmptyBody) =
+  undefined
 
 mapMethod :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Method -> Either ParseError Method
-mapMethod P.CompilationUnit {..} classMap (P.NewMethod tpTok nmTok paramsToks (P.NewBody bodyToks)) = do
+mapMethod P.CompilationUnit {..} classMap (P.NewMethod accessFlags tpTok nmTok paramsToks body) = do
   toks <- runParser satisfyQualifiedName (TermState {termStack=[],maybeTypeName=Nothing,..}) "" tpTok
   let (tp,_) = P.createQName package classMap imports toks
   let (nm,pos) = P.createName nmTok
   params <- runParser parameter (TermState {termStack=[],maybeTypeName=Nothing,..}) "" paramsToks
-  body <- runParser methodBody (TermState {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
-  return (NewMethod pos nm params tp (createSignature nm params) (MethodImpl body))
+  case body of
+    (P.NewBody bodyToks) -> do
+      parsedBody <- runParser methodBody (TermState {termStack=[],maybeTypeName=Nothing,..}) "" bodyToks
+      return (NewMethod pos accessFlags nm params tp (createSignature nm params) (Just (MethodImpl parsedBody)))
+    P.EmptyBody ->
+      return (NewMethod pos accessFlags nm params tp (createSignature nm params) Nothing)
 
-parseExtends :: (Stream s Identity TokenPos) => Parsec s TermState Extends
+parseExtends :: (Stream s Identity TokenPos) => Parsec s TermState Extends 
 parseExtends = do
   TermState {..} <- getState
   toks <- satisfyQualifiedName
@@ -202,19 +213,19 @@ parseField = do
   return (tppos,tp,nmpos,nm)
 
 createSignature :: P.SimpleName -> [Parameter] -> Signature
-createSignature nm params = Signature nm (fmap (\(NewParameter pos tp _) -> (tp,pos)) params)
+createSignature nm params = Signature nm (fmap (\(NewParameter pos tp _ _) -> (tp,pos)) params)
 
-constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState (Maybe (Either ConstructorInvocation SuperConstructorInvocation), [Assignment])
+constructorBody :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState (Either ConstructorInvocation SuperConstructorInvocation, [Assignment])
 constructorBody = do
   maybeSuper <- optionMaybe (try superConstructorInvocation)
   maybeThis <- optionMaybe (try constructorInvocation)
   assignments <- assignmentList
   case maybeSuper of
     Nothing -> case maybeThis of
-      Nothing -> return (Nothing, assignments)
-      Just ci -> return (Just (Left ci), assignments)
+      Nothing -> parserFail "invocation of this or super required in constructor"
+      Just ci -> return (Left ci, assignments)
     Just sci -> case maybeThis of
-      Nothing -> return (Just (Right sci), assignments)
+      Nothing -> return (Right sci, assignments)
       Just ci -> parserFail "this and super not allowed in same constructor"
 
 constructorInvocation :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState ConstructorInvocation
@@ -273,7 +284,7 @@ parameter = do
       let (tp,tppos) = P.createQName package classMap imports toks
       tok <- P.satisfySimpleName
       let (name,nmpos) = P.createName tok
-      fmap ([NewParameter tppos tp name] ++) nextParameter
+      fmap ([NewParameter tppos tp nmpos name] ++) nextParameter
 
 nextParameter :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState [Parameter]
 nextParameter = do
@@ -351,6 +362,7 @@ term = do
             try booleanLiteralTerm <|>
             try objectCreationTerm <|>
             try variableTerm <|>
+            try variableSuper <|>
             try variableThis <|>
             try fieldAccessTerm <|>
             try methodInvocationTerm
@@ -401,6 +413,12 @@ variableThis = do
   lookAhead expressionTerminator
   return (Value (Variable pos P.createNameThis))
 
+variableSuper :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
+variableSuper = do
+  pos <- try $ satisfyKeyword "super"
+  lookAhead expressionTerminator
+  return (Value (Variable pos P.createNameSuper))
+
 variableTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 variableTerm = do
   TermState {..} <- getState
@@ -421,12 +439,12 @@ fieldAccessTerm = do
   case maybeTypeName of
     Just typeName@(TypeName pos tp) -> do
       putState (TermState {maybeTypeName=Nothing,..})
-      return (StaticApplication typeName (FieldAccess pos name))
+      return (Application (ApplicationTargetTypeName typeName) (FieldAccess pos name))
     Nothing -> case termStack of
       [] -> parserFail "Invalid field access application"
       (t:ts) -> do
         putState (TermState {termStack=ts,..})
-        return (Application t (FieldAccess pos name))
+        return (Application (ApplicationTargetTerm t) (FieldAccess pos name))
 
 methodInvocationTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 methodInvocationTerm = do
@@ -441,12 +459,15 @@ methodInvocationTerm = do
   case maybeTypeName of
     Just typeName@(TypeName pos tp) -> do
       putState (TermState {maybeTypeName=Nothing,..})
-      return (StaticApplication typeName (MethodInvocation pos method arguments))
+      return (Application (ApplicationTargetTypeName typeName) (MethodInvocation pos method arguments))
     Nothing -> case termStack of
       [] -> parserFail "Invalid method invocation application"
       (t:ts) -> do
         putState (TermState {termStack=ts,..})
-        return (Application t (MethodInvocation pos method arguments))
+        case t of
+          Value (Variable pos' nm) | nm == P.createNameSuper ->
+            return (Application (ApplicationTargetTerm (Value (Variable pos' P.createNameThis))) (SuperMethodInvocation pos method arguments))
+          _ -> return (Application (ApplicationTargetTerm t) (MethodInvocation pos method arguments))
 
 castTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 castTerm = do
@@ -535,4 +556,4 @@ satisfyQualifiedName' first = do
 {--Does the given QualifiedName exist as a class being compiled, or a class in the classpash -}
 isValidClass :: Map.Map P.QualifiedName P.Clazz -> ClassPath -> P.QualifiedName -> Bool
 isValidClass classMap cp tp =
-  Map.member tp classMap || hasClass cp (toText (showb tp))
+  Map.member tp classMap || hasClass cp tp

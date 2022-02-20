@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module StackMapBuilder
-( StackMapFrame(..)
+( StackMapFrame
 , StackMapFrameWithOffset(..)
 , startingStackFrame
 , addStackMapFrame
@@ -13,18 +13,20 @@ import qualified Data.ByteString.Lazy as B
 import Data.ByteString.Builder (Builder, toLazyByteString, word32BE, word16BE, word8, lazyByteString)
 import Control.Monad ( foldM )
 import Data.Int (Int64)
-import TypeInfo
 import qualified Parser as P
 import qualified Parser2 as P2
+import TypeInfo(Type(..))
+import TypeValidator
+import TypeCheckerTypes
 import ConstantPoolBuilder ( ConstantPoolST, addClass, addUtf8 )
 
 data StackMapFrame = StackMapFrame { locals :: [P.QualifiedName], stack :: [Type]} deriving Show
 
 data StackMapFrameWithOffset = StackMapFrameWithOffset Int64 StackMapFrame
 
-startingStackFrame :: P.QualifiedName -> [P2.Parameter] -> StackMapFrame
+startingStackFrame :: P.QualifiedName -> [ValidTypeParameter] -> StackMapFrame
 startingStackFrame className params =
-  let paramTypes = fmap (\(P2.NewParameter _ qn _) -> qn) params
+  let paramTypes = fmap (\ValidTypeParameter {..} -> getValidTypeQName vpType) params
   in
     StackMapFrame { locals=className:paramTypes, stack=[] }
 
@@ -59,10 +61,10 @@ createStackMapFrameByteString (StackMapFrameWithOffset offset StackMapFrame {..}
 mapTypeToVariableInfo :: Type -> ConstantPoolST Builder
 mapTypeToVariableInfo tp = do
   case tp of
-    I sp -> return integerVariableInfo
-    Z sp -> return integerVariableInfo
-    L qn sp -> objectVariableInfo qn
-    UnsupportedType sp -> undefined
+    I -> return integerVariableInfo
+    Z -> return integerVariableInfo
+    L vtn -> objectVariableInfo (getValidTypeQName vtn)
+    _ -> undefined
 
 integerVariableInfo :: Builder
 integerVariableInfo = word8 0x01

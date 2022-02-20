@@ -4,6 +4,7 @@ class Main {
     static Integer java = new Integer(5);
     public static void main(String[] args) {
         A a = new A("Bob");
+        C c = new C();
         System.out.println(a.getStr());
         System.out.println(a.addString(" Long"));
         System.out.println(a.addInt(3));
@@ -16,6 +17,10 @@ class Main {
         System.out.println(a.paramTester("Ne", "Eq"));
         System.out.println(a.lubTest());
         System.out.println(a.getDefaultTZ());
+        System.out.println(c.getAbstractNumber());
+        System.out.println(c.getString());
+        System.out.println(a.staticFieldTest(5));
+        System.out.println(a.staticMethodTest());
     }
 
     Integer a;

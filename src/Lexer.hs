@@ -108,7 +108,7 @@ comments =
   try multiLineComment <|> try singleLineComment
 
 multiLineComment = do
-  string "/**"
+  string "/*"
   manyTill anyChar (try (string "*/"))
 
 singleLineComment = do
@@ -116,7 +116,8 @@ singleLineComment = do
   manyTill anyChar (try endOfLine) 
 
 keywords =
-  try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" <|> keyword "return" <|> keyword "package" <|> keyword "import")
+  try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" 
+   <|> keyword "return" <|> keyword "package" <|> keyword "import" <|> keyword "abstract")
 
 keyword kw = do
   p <- getPosition

@@ -12,10 +12,11 @@ import ByteCodeBuilder
 import System.IO (openFile,hClose,IOMode(..))
 import System.Directory (createDirectoryIfMissing)
 import qualified Data.Text as T
+import TypeCheckerTypes
 
 writeClass :: FilePath -> TypedClazz -> IO ()
-writeClass outputDirectory clazz@(NewTypedClazz qn _ _ _) = do
-  let (packageText,nameText) = deconstructQualifiedName qn
+writeClass outputDirectory clazz@(NewTypedClazz _ nameVtn _ _ _) = do
+  let (packageText,nameText) = deconstructQualifiedName (getValidTypeQName nameVtn)
   let packageDirectory = (if null packageText then "" else sep++T.unpack (pathFromTextList packageText))
   createDirectoryIfMissing True (outputDirectory++packageDirectory)
   handle <- openFile (outputDirectory++packageDirectory++"/"++T.unpack nameText++".class") WriteMode

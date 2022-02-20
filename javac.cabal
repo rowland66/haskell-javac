@@ -36,7 +36,9 @@ executable hjavac
       Parser2
       StackMapBuilder
       TypeChecker
+      TypeCheckerTypes
       TypeInfo
+      TypeValidator
       Paths_javac
   hs-source-dirs:
       src
@@ -47,6 +49,7 @@ executable hjavac
     , bytestring
     , containers
     , directory
+    , enumset
     , extra
     , filepattern
     , monad-loops
@@ -57,5 +60,6 @@ executable hjavac
     , text-show
     , transformers
     , tuple
+    , validation
     , vector
   default-language: Haskell2010

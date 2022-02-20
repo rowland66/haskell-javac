@@ -5,7 +5,7 @@ class Pair extends java.lang.Object {
   java.lang.Object snd;
 
   Pair(A fst, java.lang.Object snd) {
-    this.fst=fst; this.snd=snd;
+    super(); this.fst=fst; this.snd=snd;
   }
 
   Pair setfst(java.lang.Object newfst, Pair test) {
@@ -24,13 +24,53 @@ class B extends A {
     super();
   }
 
-  String toString() {
-    return "I'm a B";
-  }
 }
 
 class C extends A {
+  AbstractTest absTest;
+
   C() {
     super();
+    this.absTest = new AbstractImpl();
+  }
+
+  Integer getAbstractNumber() {
+    return this.absTest.getMyNumber();
+  }
+
+  String getString() {
+    return this.absTest.getString();
+  }
+}
+
+abstract class AbstractTest {
+
+  AbstractTest() {
+    super();
+  }
+
+  abstract Integer getNumber();
+
+  String getString() {
+    return this.toString();
+  }
+
+  Integer getMyNumber() {
+    return this.getNumber();
+  }
+
+  String toString() {
+    return "TestString";
+  }
+}
+
+class AbstractImpl extends AbstractTest {
+
+  AbstractImpl() {
+    super();
+  }
+
+  Integer getNumber() {
+    return 5;
   }
 }

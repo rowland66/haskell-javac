@@ -4,7 +4,7 @@ module Compiler (
 
 import qualified Data.Map.Strict as Map
 import Control.Monad (foldM,forM_, when)
-import Control.Monad.Trans.State.Strict ( StateT(runStateT) )
+import Control.Monad.Trans.State.Strict (runStateT, evalStateT)
 import Text.Parsec.Error (newErrorMessage, Message(Message))
 import Lexer
 import Parser
@@ -39,11 +39,11 @@ compile' optionMap cp defaultNameMapping srcFiles = do
   let parserResult = lexAndParseResult >>= parseClasses2
   case parserResult of
     Left e -> print e
-    Right ast -> do
+    Right astMap -> do
       print "Type Checking..."
-      (eTypedClazzes, typeData) <- runStateT (typeCheck >> transform) (cp,ast)
-      case eTypedClazzes of
-        Left errorList -> displayTypeErrors errorList >> Control.Monad.when (Map.member "-v" optionMap) (print ast)
+      eitherTypedClasses <- evalStateT (typeCheck astMap) cp
+      case eitherTypedClasses of
+        Left errors -> displayTypeErrors errors >> Control.Monad.when (Map.member "-v" optionMap) (print astMap)
         Right typedClazzes -> do
           print "Writing Classes..."
           forM_ typedClazzes (writeClass (optionMap Map.! "-d"))
@@ -103,7 +103,7 @@ displayTypeErrors :: [TypeError] -> IO ()
 displayTypeErrors = mapM_ (print)
 
 classError :: Clazz -> String -> ParseError
-classError (NewClazz pos _ _ _ _ _ _) str = newErrorMessage (Message str) pos
+classError (NewClazz pos _ _ _ _ _ _ _) str = newErrorMessage (Message str) pos
 
 defaultNameToPackageMap :: ClassPath -> Maybe NameToPackageMap
 defaultNameToPackageMap cp =

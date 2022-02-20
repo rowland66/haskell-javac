@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TupleSections #-}
 
 
 
@@ -12,6 +13,7 @@ module Parser
   , createName
   , createQName
   , createNameThis
+  , createNameSuper
   , createNameInit
   , simpleNameToString
   , createQNameObject
@@ -22,11 +24,13 @@ module Parser
   , deconstructSimpleName
   , constructQualifiedName
   , constructSimpleName
+  , ClassAccessFlag(..)
+  , MethodAccessFlag(..)
   , Clazz(NewClazz)
   , Field(NewField)
   , Constructor(NewConstructor)
   , Method(NewMethod)
-  , Body(NewBody)
+  , Body(..)
   , QualifiedName
   , SimpleName
   , CompilationUnit(..)
@@ -37,7 +41,6 @@ module Parser
 import Data.Functor.Identity (Identity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import TextShow
 import Text.Parsec.Prim
 import Text.Parsec.Combinator
     ( anyToken, eof, manyTill, optionMaybe )
@@ -45,6 +48,7 @@ import Text.Parsec.Pos
 import Text.Parsec.Error ( ParseError, newErrorMessage, Message (Message) )
 import Lexer
 import ClassPath ( ClassPath, getPackageClasses )
+import TypeCheckerTypes
 import Debug.Trace
 import qualified Data.Map.Merge.Strict as Map
 
@@ -52,37 +56,19 @@ type NameToPackageMap = Map.Map T.Text [T.Text] -- Mapping from an unqualified n
 
 data Import = SingleTypeImport SourcePos [T.Text] T.Text | TypeImportOnDemand SourcePos [T.Text] deriving Show
 
-data Body = NewBody [(Token, SourcePos)] deriving Show
+data Body = NewBody [(Token, SourcePos)] | EmptyBody deriving Show
 
 data Constructor = NewConstructor SourcePos [TokenPos] Body deriving Show
 
 data Field = NewField [TokenPos] deriving Show
 
-data Method = NewMethod [TokenPos] TokenPos [TokenPos] Body deriving Show
+data Method = NewMethod [MethodAccessFlag] [TokenPos] TokenPos [TokenPos] Body deriving Show
 
-data Clazz = NewClazz SourcePos CompilationUnit QualifiedName (Maybe [TokenPos]) [Field] [Constructor] [Method] deriving Show
+data Clazz = NewClazz SourcePos CompilationUnit QualifiedName [ClassAccessFlag] (Maybe [TokenPos]) [Field] [Constructor] [Method] deriving Show
 
 data ClazzMember = ConstructorMember Constructor | FieldMember Field | MethodMember Method deriving Show
 
 data CompilationUnit = CompilationUnit {classpath :: ClassPath, package :: [T.Text], imports :: NameToPackageMap, types :: [Clazz]} deriving Show
-
-data QualifiedName = QualifiedName [T.Text] SimpleName deriving (Eq, Ord)
-
-newtype SimpleName = SimpleName T.Text deriving (Eq, Ord)
-
-instance Show SimpleName where
-  show sn = T.unpack (toText (showb sn))
-
-instance TextShow SimpleName where
-  showb (SimpleName n) = fromText n
-
-instance Show QualifiedName where
-  show (QualifiedName [] n) = show n
-  show (QualifiedName p (SimpleName n)) = T.unpack $ T.concat [T.intercalate sep p, sep, n]
-
-instance TextShow QualifiedName where
-  showb (QualifiedName [] sn) = showb sn
-  showb (QualifiedName p (SimpleName n)) = fromText $ T.concat [T.intercalate sep p, sep, n]
 
 sep = T.singleton '/'
 
@@ -157,7 +143,7 @@ mapImportToNamePackagePairs cp (SingleTypeImport pos package name) =
 mapImportToNamePackagePairs cp (TypeImportOnDemand pos package) =
   case getPackageClasses cp package of
     Nothing -> Left $ newErrorMessage (Message "Unkown package") pos
-    Just txts -> Right (fmap (\nm -> (nm, package)) txts)
+    Just txts -> Right (fmap (, package) txts)
 
 clazzClause :: (Stream s Identity (Token, SourcePos)) => Parsec s u (SimpleName, SourcePos)
 clazzClause = do
@@ -184,16 +170,21 @@ parameterList = do
 
 constructorDeclaration :: (Stream s Identity (Token, SourcePos)) => T.Text -> Parsec s u ClazzMember
 constructorDeclaration className = do
-  pos <- token (\(tok, pos) -> show tok) snd (\(tok, pos) -> case tok of (Ide className) -> Just pos; _ -> Nothing)
+  pos <- token (\(tok, pos) -> show tok) snd (\(tok, pos) -> case tok of (Ide nm) | nm == className -> Just pos; _ -> Nothing)
   params <- parameterList
   ConstructorMember . NewConstructor pos params <$> methodBody
 
 methodDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s u ClazzMember
 methodDeclaration = do
+  abs <- try $ optionMaybe $ satisfyKeyword "abstract"
   tp <- satisfyQualifiedName
   name <- satisfySimpleName
   params <- parameterList
-  MethodMember . NewMethod tp name params <$> methodBody
+  case abs of
+    Just _ -> do 
+      satisfy Semi;
+      return ((MethodMember . NewMethod [MAbstract] tp name params) EmptyBody)
+    Nothing -> MethodMember . NewMethod [] tp name params <$> methodBody
 
 methodBody :: (Stream s Identity (Token, SourcePos)) => Parsec s u Body
 methodBody = do
@@ -211,18 +202,19 @@ classMemberDeclarations clazzName = do
 clazzDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s CompilationUnit (CompilationUnit, [(Token, SourcePos)])
 clazzDeclaration = do
   cu@CompilationUnit {..} <- getState
+  maybeAbstract <- try $ optionMaybe $ satisfyKeyword "abstract"
   (clazz@(SimpleName clazzName), pos) <- clazzClause
-  {--if (Map.member clazzName clazzMap) then (parserFail ("Duplicate class " ++ clazzName)) else parserReturn ()-}
   maybeSuperClazz <- optionMaybe extendsClause
   satisfy LBrace
   clazzMembers <- classMemberDeclarations clazzName
   satisfy RBrace
   rest <- manyTill anyToken eof
+  let af = case maybeAbstract of Just _ -> [CAbstract]; Nothing -> []
   let newClazz = NewClazz
-                   pos cu (QualifiedName package clazz) maybeSuperClazz
+                   pos cu (QualifiedName package clazz) af maybeSuperClazz
                    (extractField <$> filter (\case (FieldMember _) -> True; _ -> False) clazzMembers)
                    (extractConstructor <$> filter (\case (ConstructorMember _) -> True; _ -> False) clazzMembers)
-                   (extractMethod <$> filter (\case (MethodMember _) -> True; (_) -> False) clazzMembers)
+                   (extractMethod <$> filter (\case (MethodMember _) -> True; _ -> False) clazzMembers)
                    where extractField (FieldMember f) = f
                          extractConstructor (ConstructorMember c) = c
                          extractMethod (MethodMember m) = m
@@ -286,6 +278,8 @@ createName (Ide name, pos) = (SimpleName name, pos)
 
 createNameThis = SimpleName (T.pack "this")
 
+createNameSuper = SimpleName (T.pack "super")
+
 createNameInit = SimpleName (T.pack "<init>")
 
 {-- Create a qualified name from a list of tokens. If the list of tokens has only 1 token, apply the package and lookup
@@ -311,26 +305,3 @@ createQName package classMap imports toks =
 
 
 simpleNameToString (SimpleName name) = T.unpack name
-
-createQNameObject = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Object"))
-
-createQNameInteger = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Integer"))
-
-createQNameString = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "String"))
-
-createQNameBoolean = QualifiedName [T.pack "java", T.pack "lang"] (SimpleName (T.pack "Boolean"))
-
-deconstructSimpleName :: SimpleName -> T.Text
-deconstructSimpleName (SimpleName n) = n
-
-deconstructQualifiedName :: QualifiedName -> ([T.Text], T.Text)
-deconstructQualifiedName (QualifiedName p (SimpleName n)) = (p,n)
-
-constructQualifiedName :: T.Text -> QualifiedName
-constructQualifiedName t =
-  let (package, simpleName) = T.breakOnEnd sep t
-  in
-    QualifiedName (T.splitOn sep (T.dropEnd 1 package)) (SimpleName simpleName)
-
-constructSimpleName :: T.Text -> SimpleName
-constructSimpleName = SimpleName

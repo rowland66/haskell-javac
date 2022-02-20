@@ -36,6 +36,8 @@ dependencies:
 - tuple
 - monadlist
 - monad-loops
+- enumset
+- validation
 
 executables:
   hjavac:

@@ -79,4 +79,32 @@ class A extends Object {
   String getDefaultTZ() {
     return TimeZone.getDefault().getDisplayName();
   }
+
+  Integer abstractTest(Number a) {
+    return a.intValue();
+  }
+
+  Integer staticFieldTest(Integer a) {
+    return Integer.BYTES;
+  }
+
+  Integer staticMethodTest() {
+    return this.bar.bitCount(this.bar);
+  }
 }
+
+class StringReaderTest extends Object {
+
+  StringReaderTest() {
+    super();
+  }
+
+  Integer readData(Readable readable) {
+    return readable.read(java.nio.CharBuffer.allocate(128).append("Good evening sir."));
+  }
+
+  java.nio.CharBuffer getBuffer() {
+    return java.nio.CharBuffer.allocate(128).append("Good evening sir.");
+  }
+
+} 

@@ -1,23 +1,46 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 
 {-- The ClassPath module provide access to Java .class files in the classpath. Data from these classes
     is required by the compiler. A ClassPath type provides map from package names to a second map from
     type names to a reference to the type byte code (in a Directory or Jar file). Once the byte code for
     a type has been loaded an parsed in the a ClassDescriptor, the ClassDescriptors are stored in another
     map in the ClassPath. This classMap serves as a cache for ClassDescriptors and is always consulted
-    first before looking in the referenceMap. 
+    first before looking in the referenceMap.
+
+    The ClassPathValidTypeName constructors are private to this module. A ClassPathValidType name serves
+    as proof that a type name represents a valid classpath type. 
 -}
 module ClassPath
 ( ClassPath
+, ClassPathValidTypeName -- No constructors exported for this type by design
+, ClassPathType
 , ClassDescriptor(..)
 , Field(..)
 , Method(..)
 , createClassPath
 , getClass
+, getClassPathValidType
+, getClassValidTypeName
 , hasClass
+, isClassPathTypeBoolean
+, isClassPathTypeInteger
+, isClassPathTypeReference
+, getClassPathTypeReference
 , getPackageClasses
+, mapMethodToParamTypeList
+, mapMethodToResultType
 , main
+, cInterfaceMaskedValue
+, cAbstractMaskedValue
+, fStaticMaskedValue
+, mStaticMaskedValue
+, mAbstractMaskedValue
+, mSyncheticMaskedValue
+, mBridgeMaskedValue
+, createValidTypeNameObject
+, createValidTypeNameInteger
+, createValidTypeNameBoolean
+, createValidTypeNameString
 ) where
 
 import qualified Data.Map.Strict as Map
@@ -29,18 +52,28 @@ import Data.ByteString.Builder ( toLazyByteString, word32BE )
 import Data.Word ( Word8, Word16, Word32, Word64 )
 import Data.Binary ( decode )
 import qualified Data.Text as T
-import Data.List ( find, elemIndices )
+import Data.List ( find, elemIndices, foldl' )
 import Data.Text.Encoding (decodeUtf8)
 import Data.List.Split (splitOn)
 import System.FilePattern.Directory (getDirectoryFiles)
 import Control.Monad (foldM)
 import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.Trans.State.Strict as ST
-import TextShow ( TextShow(showt) )
+import TextShow (TextShow(showt),showb,toText )
 import Debug.Trace (trace, traceStack)
 import Control.Monad.Trans.State.Strict (StateT,get,put,evalStateT)
+import Control.Monad.Extra (join)
+import Text.Parsec ( anyChar, char, manyTill, (<|>), runParser )
+import Data.Bits ( Bits(bit) )
+import qualified Data.FlagSet as FS
+import TypeCheckerTypes
 
 type ClassReferenceMap = Map.Map T.Text ClassReference
+
+newtype ClassPathValidTypeName = ClassPathVTN QualifiedName deriving (Eq,Ord)
+
+instance ValidTypeQName ClassPathValidTypeName where
+  getValidTypeQName (ClassPathVTN qn) = qn
 
 type PackageMap = Map.Map T.Text ClassReferenceMap -- Mapping from qualified name to the class bytes reference
 
@@ -52,29 +85,31 @@ data ClassPath = ClassPath { directories :: [T.Text]
 
 data ClassReference = DirectoryReference T.Text | JarReference T.Text deriving (Show)
 
-data ClassDescriptor = ClassDescriptor { name :: !T.Text
-                                       , parent :: !T.Text
+data ClassDescriptor = ClassDescriptor { name :: !ClassPathValidTypeName
+                                       , parent :: !ClassPathValidTypeName
+                                       , accessFlags :: FS.T Word16 ClassAccessFlag
+                                       , interfaceClasses :: ![ClassPathValidTypeName]
                                        , fields :: ![Field]
                                        , methods :: ![Method]
                                        }
 
 data Field = Field { fname :: !T.Text
-                   , ftype :: !T.Text
-                   , faccess_flags :: !Word16
+                   , ftype :: ClassPathType
+                   , faccessFlags :: FS.T Word16 FieldAccessFlag
                    }
 
 data Method = Method { mname :: !T.Text
                      , mdescriptor :: !T.Text
-                     , maccess_flags :: !Word16
+                     , maccessFlags :: FS.T Word16 MethodAccessFlag
                      }
 
 data ClassFile = ClassFile { minor_version :: !Word16
                            , major_version :: !Word16
                            , constant_pool :: Vector Cp_info
                            , access_flags :: !Word16
-                           , this_class :: Int
-                           , super_class :: Int
-                           , interfaces :: Vector CONSTANT_Class_info
+                           , this_class :: !Int
+                           , super_class :: !Int
+                           , interfaces :: Vector Int
                            , fields_info :: Vector Field_info
                            , methods_info :: Vector Method_info
                            } deriving (Show)
@@ -94,14 +129,14 @@ data Cp_info = ClassInfo CONSTANT_Class_info
              | MethodTypeInfo CONSTANT_MethodType_info
              | DynamicInfo CONSTANT_Dynamic_info
              | InvokeDynamicInfo CONSTANT_InvokeDynamic_info
-             | Empty
+             | CpEmpty
              deriving (Show)
 
 newtype CONSTANT_Class_info = CONSTANT_Class_info { ci_name_index :: Int
                                                } deriving (Show)
 
 newtype CONSTANT_Utf8_info = CONSTANT_Utf8_info { u_text :: T.Text
-                                             } deriving (Show)
+                                                } deriving (Show)
 
 data CONSTANT_NameAndType_info = CONSTANT_NameAndType_info { nt_name_index :: Int
                                                            , nt_descriptor_index :: Int
@@ -130,17 +165,17 @@ newtype CONSTANT_Long_info = CONSTANT_Long_info { l_bytes :: Word64 } deriving (
 newtype CONSTANT_Double_info = CONSTANT_Double_info { d_bytes :: Word64 } deriving (Show)
 
 data CONSTANT_MethodHandle_info = CONSTANT_MethodHandle_info { mh_reference_kind :: Word8
-                                                             , mh_reference_index :: Int 
+                                                             , mh_reference_index :: Int
                                                              } deriving Show
 
 data CONSTANT_MethodType_info = CONSTANT_MethodType_info { mt_descriptor_index :: Int } deriving Show
 
-data CONSTANT_Dynamic_info = CONSTANT_Dynamic_info { d_bootstrap_method_attr_index :: Int 
-                                                   , d_name_and_type_index :: Int 
+data CONSTANT_Dynamic_info = CONSTANT_Dynamic_info { d_bootstrap_method_attr_index :: Int
+                                                   , d_name_and_type_index :: Int
                                                    } deriving Show
 
-data CONSTANT_InvokeDynamic_info = CONSTANT_InvokeDynamic_info { id_bootstrap_method_attr_index :: Int 
-                                                               , id_name_and_type_index :: Int 
+data CONSTANT_InvokeDynamic_info = CONSTANT_InvokeDynamic_info { id_bootstrap_method_attr_index :: Int
+                                                               , id_name_and_type_index :: Int
                                                                } deriving Show
 
 data Field_info = Field_info { fi_access_flags :: !Word16
@@ -157,8 +192,132 @@ data Method_info = Method_info { mi_access_flags :: !Word16
 
 newtype Attribute_info = Attribute_info { attribute_name_index :: Int
                                      } deriving (Show)
+createValidTypeNameObject = ClassPathVTN createQNameObject
 
-getClassFieldType :: ClassDescriptor -> T.Text -> Maybe T.Text
+createValidTypeNameInteger = ClassPathVTN createQNameInteger
+
+createValidTypeNameBoolean = ClassPathVTN createQNameBoolean
+
+createValidTypeNameString = ClassPathVTN createQNameString
+
+data ClassPathType = I
+          | Z
+          | V
+          | B
+          | C
+          | D
+          | F
+          | J
+          | S
+          | A ClassPathType
+          | L ClassPathValidTypeName
+
+instance Show ClassPathType where
+  show I = "I"
+  show Z = "Z"
+  show V = "V"
+  show B = "B"
+  show C = "C"
+  show D = "D"
+  show F = "F"
+  show J = "J"
+  show S = "S"
+  show (A t) = "["++show t
+  show (L vtn) = "L"++show vtn++";"
+
+instance Eq ClassPathType where
+  (==) I I = True
+  (==) Z Z = True
+  (==) V V = True
+  (==) B B = True
+  (==) C C = True
+  (==) D D = True
+  (==) F F = True
+  (==) J J = True
+  (==) S S = True
+  (==) (A t) (A t') = t == t'
+  (==) (L n1) (L n2) = n1 == n2
+  (==) _ _ = False
+
+readType :: T.Text -> ClassPathType
+readType t | T.unpack (T.take 1 t) == "I" = I
+readType t | T.unpack (T.take 1 t) == "Z" = Z
+readType t | T.unpack (T.take 1 t) == "V" = V
+readType t | T.unpack (T.take 1 t) == "B" = B
+readType t | T.unpack (T.take 1 t) == "C" = C
+readType t | T.unpack (T.take 1 t) == "D" = D
+readType t | T.unpack (T.take 1 t) == "F" = F
+readType t | T.unpack (T.take 1 t) == "J" = J
+readType t | T.unpack (T.take 1 t) == "S" = S
+readType t | T.unpack (T.take 1 t) == "[" = A (readType t)
+readType t | T.unpack (T.take 1 t) == "L" = L (ClassPathVTN (constructQualifiedName $ T.drop 1 (T.dropEnd 1 t)))
+readType t = undefined
+
+mapMethodToParamTypeList :: Method -> [ClassPathType]
+mapMethodToParamTypeList Method {..} =
+  let (paramTypes,_) = parseMethodDescriptor mdescriptor
+  in
+    paramTypes
+
+mapMethodToResultType :: Method -> ClassPathType
+mapMethodToResultType Method {..} =
+  let (_,resultType) = parseMethodDescriptor mdescriptor
+  in
+    resultType
+
+parseMethodDescriptor :: T.Text -> ([ClassPathType],ClassPathType)
+parseMethodDescriptor t =
+  let eitherResult = runParser parseMethodDescriptor' () (T.unpack t) (T.unpack t)
+  in
+    case eitherResult of
+      Left e -> trace ("Parse descriptor failure: "++T.unpack t++show e) undefined
+      Right r -> r
+
+parseMethodDescriptor' = do
+  char '('
+  paramTypes <- manyTill (parsePrimitiveType <|> parseReferenceType) (char ')')
+  returnType <- parsePrimitiveType <|> parseReferenceType
+  return (paramTypes,returnType)
+
+parsePrimitiveType = do
+  c <- char 'I' <|> char 'Z' <|> char 'V' <|> char 'B' <|> char 'C' <|> char 'D' <|> char 'F' <|> char 'J' <|> char 'S' <|> char '['
+  case c of
+    'I' -> return I
+    'Z' -> return Z
+    'V' -> return V
+    'B' -> return B
+    'C' -> return C
+    'D' -> return D
+    'F' -> return F
+    'J' -> return J
+    'S' -> return S
+    '[' -> do
+      t <- parsePrimitiveType <|> parseReferenceType
+      return $ A t
+    _ -> undefined
+
+parseReferenceType = do
+  char 'L'
+  s <-manyTill anyChar (char ';')
+  return $ L (ClassPathVTN (constructQualifiedName (T.pack s)))
+
+isClassPathTypeBoolean :: ClassPathType -> Bool
+isClassPathTypeBoolean Z = True
+isClassPathTypeBoolean _ = False
+
+isClassPathTypeInteger :: ClassPathType -> Bool
+isClassPathTypeInteger I = True
+isClassPathTypeInteger _ = False
+
+isClassPathTypeReference :: ClassPathType -> Bool
+isClassPathTypeReference (L cpvtn) = True
+isClassPathTypeReference _ = False
+
+getClassPathTypeReference :: ClassPathType -> Maybe ClassPathValidTypeName
+getClassPathTypeReference (L cpvtn) = Just cpvtn
+getClassPathTypeReference _ = Nothing
+
+getClassFieldType :: ClassDescriptor -> T.Text -> Maybe ClassPathType
 getClassFieldType ClassDescriptor {..} fieldName =
   (\Field {..} -> ftype) <$> Data.List.find (\Field {..} -> fname == fieldName) fields
 
@@ -167,16 +326,50 @@ magicByteString = B.unpack (toLazyByteString (word32BE 0xCAFEBABE))
 
 sep = T.pack "/"
 
+instance Show ClassPathValidTypeName where
+  show (ClassPathVTN qn) = show qn
+
+instance FS.Enum ClassAccessFlag where
+  fromEnum CPublic = FS.maskValue (FS.Mask (bit 0)) (FS.Value (bit 0))
+  fromEnum CInterface = FS.maskValue (FS.Mask (bit 9)) (FS.Value (bit 9))
+  fromEnum CAbstract = FS.maskValue (FS.Mask (bit 10))  (FS.Value (bit 10))
+
+cInterfaceMaskedValue = FS.maskValue (FS.Mask (bit 9)) (FS.Value (bit 9)) :: FS.MaskedValue Word16 ClassAccessFlag
+cAbstractMaskedValue = FS.maskValue (FS.Mask (bit 10))  (FS.Value (bit 10)) :: FS.MaskedValue Word16 ClassAccessFlag
+
+instance FS.Enum FieldAccessFlag where
+  fromEnum FStatic = FS.maskValue (FS.Mask (bit 3)) (FS.Value (bit 3))
+
+fStaticMaskedValue = FS.maskValue (FS.Mask (bit 3)) (FS.Value (bit 3)) :: FS.MaskedValue Word16 FieldAccessFlag
+
+instance FS.Enum MethodAccessFlag where
+  fromEnum MStatic = FS.maskValue (FS.Mask (bit 3)) (FS.Value (bit 3))
+  fromEnum MAbstract = FS.maskValue (FS.Mask (bit 10)) (FS.Value (bit 10))
+  fromEnum MSynthetic = FS.maskValue (FS.Mask (bit 12)) (FS.Value (bit 12))
+  fromEnum MBridge = FS.maskValue (FS.Mask (bit 6)) (FS.Value (bit 6))
+
+mStaticMaskedValue = FS.maskValue (FS.Mask (bit 3)) (FS.Value (bit 3)) :: FS.MaskedValue Word16 MethodAccessFlag
+mAbstractMaskedValue = FS.maskValue (FS.Mask (bit 10))  (FS.Value (bit 10)) :: FS.MaskedValue Word16 MethodAccessFlag
+mSyncheticMaskedValue = FS.maskValue (FS.Mask (bit 12))  (FS.Value (bit 12)) :: FS.MaskedValue Word16 MethodAccessFlag
+mBridgeMaskedValue = FS.maskValue (FS.Mask (bit 6))  (FS.Value (bit 6)) :: FS.MaskedValue Word16 MethodAccessFlag
+
+instance Show (FS.T w a) where
+  show FS.Cons{..} = "Nothing"
+
 instance Show ClassDescriptor where
-  show ClassDescriptor {..} = "class "++T.unpack name++" extends "++T.unpack parent++"\n"++
+  show ClassDescriptor {..} = abs++"class "++show name++" extends "++show parent++"\n"++
                               "Fields:\n"++concat (foldl (\l f -> ("         "++show f++"\n"):l) [] fields)++"\n"++
                               "Methods:\n"++concat (foldl (\l m -> ("          "++show m++"\n"):l) [] methods)++"\n"
+                              where
+                                abs = if FS.match accessFlags cAbstractMaskedValue then "abstract " else ""
 
 instance Show Field where
-  show Field {..} = T.unpack ftype++" "++T.unpack fname
+  show Field {..} = show ftype++" "++T.unpack fname
 
 instance Show Method where
   show Method {..} = T.unpack mname++" "++T.unpack mdescriptor
+    where
+      abs = if FS.match maccessFlags mAbstractMaskedValue  then "abstract " else ""
 
 readClassFile :: ClassReference -> T.Text -> IO (Maybe ClassFile)
 readClassFile (DirectoryReference directory) name = do
@@ -198,7 +391,7 @@ readClassFile' fp handle = do
     this_class <- getIndex handle
     super_class <- getIndex handle
     interfaces_count <- getCount handle
-    interfaces <- V.replicateM interfaces_count (readClassInfo handle)
+    interfaces <- V.replicateM interfaces_count (getIndex handle)
     fields_count <- getCount handle
     fields <- V.replicateM fields_count (readFieldInfo handle)
     methods_count <- getCount handle
@@ -223,7 +416,7 @@ readConstantPoolInfo handle = do
   isRepeat <- ST.get
   if isRepeat then do
     ST.put False
-    return Empty
+    return CpEmpty
   else do
     tagByte <- lift $ B.hGet handle 1
     let tag = (fromIntegral (decode tagByte :: Word8) :: Int)
@@ -387,24 +580,33 @@ getClassFromConstantPool ClassFile {constant_pool=cp} index =
 
 getUtf8FromConstantPool :: ClassFile -> Int -> T.Text
 getUtf8FromConstantPool ClassFile {constant_pool=cp} index =
-  let (Utf8Info u) = cp V.! (index - 1) in u_text u
+  let cpInfo = cp V.! (index - 1)
+  in
+    case cpInfo of
+      (Utf8Info u) -> u_text u
+      _ -> trace (show index++":"++show cpInfo) undefined
 
 createClassDescriptor :: ClassFile -> ClassDescriptor
-createClassDescriptor classFile =
-  let classInfo = getClassFromConstantPool classFile (this_class classFile)
-      name = getUtf8FromConstantPool classFile (ci_name_index classInfo)
-      parent = if super_class classFile > 0 
-        then getUtf8FromConstantPool classFile (ci_name_index (getClassFromConstantPool classFile (super_class classFile)))
-        else T.pack "" -- Only java/lang/Object should get here 
-      fields = foldl (\list f -> mapField classFile f:list) [] (fields_info classFile)
-      methods = foldl (\list m -> mapMethod classFile m:list) [] (methods_info classFile) in
+createClassDescriptor classFile@ClassFile {..} =
+  let classInfo = getClassFromConstantPool classFile this_class
+      accessFlags = FS.Cons access_flags
+      name = ClassPathVTN $ constructQualifiedName $ getUtf8FromConstantPool classFile (ci_name_index classInfo)
+      parent = ClassPathVTN $ if super_class > 0
+        then constructQualifiedName $ getUtf8FromConstantPool classFile (ci_name_index (getClassFromConstantPool classFile super_class))
+        else createQNameObject -- Only java/lang/Object should get here 
+      interfaceClasses = foldl' (\list classInfoNdx ->
+        ClassPathVTN (constructQualifiedName (getUtf8FromConstantPool classFile (ci_name_index (getClassFromConstantPool classFile classInfoNdx)))):list)
+        []
+        interfaces
+      fields = foldl (\list f -> mapField classFile f:list) [] fields_info
+      methods = foldl (\list m -> mapMethod classFile m:list) [] methods_info in
   ClassDescriptor {..}
 
 mapField :: ClassFile -> Field_info -> Field
 mapField classFile fi =
   let fname = getUtf8FromConstantPool classFile (fi_name_index fi)
-      ftype = getUtf8FromConstantPool classFile (fi_descriptor_index fi)
-      faccess_flags = fi_access_flags fi
+      ftype = readType $ getUtf8FromConstantPool classFile (fi_descriptor_index fi)
+      faccessFlags = FS.Cons $ fi_access_flags fi
   in
     Field {..}
 
@@ -412,7 +614,7 @@ mapMethod :: ClassFile -> Method_info -> Method
 mapMethod classFile mi =
   let mname = getUtf8FromConstantPool classFile (mi_name_index mi)
       mdescriptor = getUtf8FromConstantPool classFile (mi_descriptor_index mi)
-      maccess_flags = mi_access_flags mi
+      maccessFlags = FS.Cons $ mi_access_flags mi
   in
     Method {..}
 
@@ -437,13 +639,24 @@ getClass qualifiedName = do
               put ClassPath {classMap=Map.insert qualifiedName newClassDescriptor classMap,..}
               return $ Just newClassDescriptor
 
-hasClass :: ClassPath -> T.Text -> Bool
+getClassPathValidType :: ClassPathValidTypeName -> StateT ClassPath IO ClassDescriptor
+getClassPathValidType (ClassPathVTN qn) = do
+  maybeClassDesciptor <- getClass (showt qn)
+  case maybeClassDesciptor of
+    Nothing -> error ("Classpath consitency error. Unable to load class: "++show qn)
+    Just cd -> return cd
+
+hasClass :: ClassPath -> QualifiedName -> Bool
 hasClass cp qualifiedName =
-  let (package,clazz) = T.breakOnEnd sep qualifiedName
+  case getClassValidTypeName cp qualifiedName of Just _ -> True; Nothing -> False
+
+getClassValidTypeName :: ClassPath -> QualifiedName -> Maybe ClassPathValidTypeName
+getClassValidTypeName cp qualifiedName =
+  let (package,clazz) = T.breakOnEnd sep (toText (showb qualifiedName))
       maybeSubMap = if T.length package > 0 then referenceMap cp Map.!? package else Nothing
-      maybeRef = fmap (Map.!? clazz) maybeSubMap
+      maybeRef = (Map.!? clazz) =<< maybeSubMap
   in
-    case maybeRef of Just _ -> True; Nothing -> False
+    case maybeRef of Just _ -> Just (ClassPathVTN qualifiedName); Nothing -> Nothing
 
 getPackageClasses :: ClassPath -> [T.Text] -> Maybe [T.Text]
 getPackageClasses cp package =
