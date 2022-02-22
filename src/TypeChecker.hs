@@ -648,10 +648,9 @@ getMostSpecificMethod mdList = do
       case result of
         r@(Just _) -> return r
         Nothing -> do
-          cnt <- countLessSpecific md
-          if List.length mdList == cnt then return (Just md) else return Nothing
-    countLessSpecific (MethodDeclaration m) =
-      foldM (\cnt candidate -> ifM (isMethodApplicableByLooseInvocation candidate (getMethodSignature m)) (return (cnt+1)) (return cnt)) (0 :: Int) mdList
+          ifM (isMostSpecific md) (return (Just md)) (return Nothing)
+    isMostSpecific (MethodDeclaration m) =
+      and <$> mapM (\candidate -> ifM (isMethodApplicableByLooseInvocation candidate (getMethodSignature m)) (return True) (return False)) mdList
 
 getApplicableMethods :: TypeInfo -> MethodSignature -> StateT ValidTypeClassData IO [MethodDeclaration]
 getApplicableMethods ti signature = do

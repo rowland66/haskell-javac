@@ -18,7 +18,6 @@ module ClassPath
 , Field(..)
 , Method(..)
 , createClassPath
-, getClass
 , getClassPathValidType
 , getClassValidTypeName
 , hasClass
@@ -46,7 +45,9 @@ module ClassPath
 import qualified Data.Map.Strict as Map
 import Data.Vector (Vector)
 import qualified Data.Vector as V hiding (Vector)
-import System.IO (IOMode(..),Handle, withBinaryFile)
+import System.IO (IOMode(..),Handle, withBinaryFile,hPutStrLn,stderr)
+import System.Exit ( ExitCode(ExitFailure), exitWith )
+import qualified Control.Exception as E
 import qualified Data.ByteString.Lazy as B
 import Data.ByteString.Builder ( toLazyByteString, word32BE )
 import Data.Word ( Word8, Word16, Word32, Word64 )
@@ -372,14 +373,23 @@ instance Show Method where
       abs = if FS.match maccessFlags mAbstractMaskedValue  then "abstract " else ""
 
 readClassFile :: ClassReference -> T.Text -> IO (Maybe ClassFile)
-readClassFile (DirectoryReference directory) name = do
+readClassFile classRef fp = 
+  E.catch
+    (readClassFile' classRef fp)
+    (\e -> do 
+      let err = E.displayException (e :: E.IOException)
+      hPutStrLn stderr ("failure accessing class file in classpath "++err)
+      exitWith (ExitFailure 1))    
+
+readClassFile' :: ClassReference -> T.Text -> IO (Maybe ClassFile)
+readClassFile' (DirectoryReference directory) name = do
   let fp = directory <> sep <> name <> T.pack ".class"
-  withBinaryFile (T.unpack fp) ReadMode (readClassFile' (T.unpack fp))
-readClassFile (JarReference jar) name =
+  withBinaryFile (T.unpack fp) ReadMode (readClassFile'' (T.unpack fp))
+readClassFile' (JarReference jar) name =
   return Nothing
 
-readClassFile' :: FilePath -> Handle -> IO (Maybe ClassFile)
-readClassFile' fp handle = do
+readClassFile'' :: FilePath -> Handle -> IO (Maybe ClassFile)
+readClassFile'' fp handle = do
   magic <- B.hGet handle 4
   if magicByteString == B.unpack magic then do
     minor <- B.hGet handle 2
@@ -679,7 +689,16 @@ createClassPath cpString = do
   return ClassPath {..}
 
 refMapFromDirectory :: FilePath -> IO PackageMap
-refMapFromDirectory directoryPath = do
+refMapFromDirectory fp = 
+  E.catch 
+    (refMapFromDirectory' fp)
+    (\e -> do 
+      let err = E.displayException (e :: E.IOException)
+      hPutStrLn stderr ("failure accessing classpath directory "++err)
+      exitWith (ExitFailure 1))
+
+refMapFromDirectory' :: FilePath -> IO PackageMap
+refMapFromDirectory' directoryPath = do
   let directoryPathReference = DirectoryReference (T.pack directoryPath)
   directoryFiles <- getDirectoryFiles directoryPath ["**/*.class"]
   let mappingList = fmap (\f -> (mapFilePathToQualifiedName f, directoryPathReference)) directoryFiles

@@ -4,6 +4,9 @@ module Lexer
     , tokenizeFromFile
     ) where
 
+import qualified Control.Exception as E 
+import System.IO
+import System.Exit
 import Text.ParserCombinators.Parsec hiding (token, tokens)
 import Text.Parsec.Char (endOfLine)
 import Control.Applicative ((<*), (*>), (<$>), (<*>))
@@ -149,4 +152,9 @@ tokens :: Parser [TokenPos]
 tokens = spaces *> many (token <* spaces)
 
 tokenizeFromFile :: FilePath -> IO (Either ParseError [TokenPos])
-tokenizeFromFile = parseFromFile tokens
+tokenizeFromFile fp = E.catch 
+  (parseFromFile tokens fp)
+  (\e -> do 
+    let err = E.displayException (e :: E.IOException)
+    hPutStrLn stderr ("failure reading compilation unit "++err)
+    exitWith (ExitFailure 1))
