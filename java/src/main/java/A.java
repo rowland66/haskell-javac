@@ -4,21 +4,26 @@ import java.util.Vector;
 import java.util.TimeZone;
 
 class A extends Object {
+  /**
   String foo;
   String foo2;
   Integer bar;
   Boolean b;
-  Vector v;
+  */
+  Vector<Integer> v;
 
   A() {
     super();
+    /**
     this.foo = "Rowland";
     this.foo2 = "Smit";
     this.bar = 5;
     this.b = true;
-    this.v = new Vector();
+    */
+    this.v = new Vector<Integer>();
   }
 
+/**
   A(String f) {
     this();
     this.foo = f;
@@ -43,14 +48,14 @@ class A extends Object {
   Integer addInt(Integer a) {
     return featherjava.lang.IntegerMath.add(this.bar, featherjava.lang.IntegerMath.mul(a,2));
   }
-
+  */
   /**
     Calling method with parameters of different types, and boxing result.
    */
   Boolean test(Integer a) {
     return this.v.add(a);
   }
-
+/**
   Integer compare(String a) {
     return this.foo.compareTo(a);
   }
@@ -91,8 +96,9 @@ class A extends Object {
   Integer staticMethodTest() {
     return this.bar.bitCount(this.bar);
   }
+  */
 }
-
+/**
 class StringReaderTest extends Object {
 
   StringReaderTest() {
@@ -108,3 +114,4 @@ class StringReaderTest extends Object {
   }
 
 } 
+*/

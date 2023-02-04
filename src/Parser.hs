@@ -3,11 +3,11 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
 
+{-- Parse a stream of tokens into a Map of Clazz's. Each Clazz has Fields, Constructors and Methods that contain tokens. -}
 
-
-{-- Parse a stream of tokens into a Map of Clazz's. Each Clazz has Fields, Constructors and Methods, that contain  -}
 module Parser
   ( satisfy
+  , satisfyAny
   , satisfySimpleName
   , satisfyQualifiedName
   , createName
@@ -41,6 +41,7 @@ module Parser
 import Data.Functor.Identity (Identity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import Data.Maybe ( fromMaybe )
 import Text.Parsec.Prim
 import Text.Parsec.Combinator
     ( anyToken, eof, manyTill, optionMaybe )
@@ -56,11 +57,11 @@ type NameToPackageMap = Map.Map T.Text [T.Text] -- Mapping from an unqualified n
 
 data Import = SingleTypeImport SourcePos [T.Text] T.Text | TypeImportOnDemand SourcePos [T.Text] deriving Show
 
-data Body = NewBody [(Token, SourcePos)] | EmptyBody deriving Show
+data Body = NewBody [TokenPos] | EmptyBody deriving Show
 
 data Constructor = NewConstructor SourcePos [TokenPos] Body deriving Show
 
-data Field = NewField [TokenPos] deriving Show
+data Field = NewField [TokenPos] [TokenPos] TokenPos deriving Show -- Type TypeArgs Name
 
 data Method = NewMethod [MethodAccessFlag] [TokenPos] TokenPos [TokenPos] Body deriving Show
 
@@ -159,14 +160,20 @@ extendsClause = do
 fieldDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s u ClazzMember
 fieldDeclaration = do
   tp <- satisfyQualifiedName
+  maybeTypeArguments <- optionMaybe typeArgumentList
   name <- satisfySimpleName
   satisfy Semi
-  return $ FieldMember (NewField (tp++[name]))
+  return $ FieldMember (NewField tp (fromMaybe [] maybeTypeArguments) name)
 
 parameterList :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
 parameterList = do
   satisfy LParens
   manyTill anyToken (try (satisfy RParens))
+
+typeArgumentList :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
+typeArgumentList = do
+  satisfy LAngleBracket
+  manyTill anyToken (try (satisfy RAngleBracket))
 
 constructorDeclaration :: (Stream s Identity (Token, SourcePos)) => T.Text -> Parsec s u ClazzMember
 constructorDeclaration className = do
@@ -181,7 +188,7 @@ methodDeclaration = do
   name <- satisfySimpleName
   params <- parameterList
   case abs of
-    Just _ -> do 
+    Just _ -> do
       satisfy Semi;
       return ((MethodMember . NewMethod [MAbstract] tp name params) EmptyBody)
     Nothing -> MethodMember . NewMethod [] tp name params <$> methodBody
@@ -219,6 +226,11 @@ clazzDeclaration = do
                          extractConstructor (ConstructorMember c) = c
                          extractMethod (MethodMember m) = m
   return (CompilationUnit {types=newClazz:types, ..}, rest)
+
+satisfyAny :: (Stream s Identity (Token, SourcePos)) => Parsec s u (SourcePos,Token)
+satisfyAny = token (\(tok, pos) -> show tok)
+                  snd
+                  (\(tok, pos) -> Just (pos,tok))
 
 satisfy :: (Stream s Identity (Token, SourcePos)) => Token -> Parsec s u SourcePos
 satisfy t = token (\(tok, pos) -> show tok)
@@ -297,7 +309,7 @@ createQName package classMap imports [(tok,pos)]
     qn = QualifiedName package (SimpleName sn)
 createQName package classMap imports toks =
   (qn, pos)
-  where ts = foldl (\ts (Ide t,_) -> t:ts) [] toks
+  where ts = foldl (\ts tok -> case tok of (Ide t,_) -> t:ts; _ -> trace (show tok) undefined) [] toks
         q = init ts
         n = last ts
         qn = QualifiedName q (SimpleName n)

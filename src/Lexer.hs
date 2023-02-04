@@ -19,6 +19,8 @@ data Token = Ide T.Text
            | RBrace
            | LParens
            | RParens
+           | LAngleBracket
+           | RAngleBracket
            | Semi
            | Dot
            | Comma
@@ -91,11 +93,13 @@ escCarriageReturn = fmap (const '\r') (try $ string "\\r")
 escBackSlash :: Parser Char
 escBackSlash = fmap (const '\\') (try $ string "\\\\")
 
-lbrace, rbrace, lparens, rparens, semi, dot, comma, operator, asterick, colon, question:: Parser TokenPos
+lbrace, rbrace, lparens, rparens, langleBracket, rangleBracket, semi, dot, comma, operator, asterick, colon, question:: Parser TokenPos
 lbrace = parseCharToken '{' LBrace
 rbrace = parseCharToken '}' RBrace
 lparens = parseCharToken '(' LParens
 rparens = parseCharToken ')' RParens
+langleBracket = parseCharToken '<' LAngleBracket
+rangleBracket = parseCharToken '>' RAngleBracket
 semi = parseCharToken ';' Semi
 dot = parseCharToken '.' Dot
 comma = parseCharToken ',' Comma
@@ -108,7 +112,7 @@ parseCharToken :: Char -> Token -> Parser TokenPos
 parseCharToken c t = do p <- getPosition; char c; return (t,p)
 
 comments =
-  try multiLineComment <|> try singleLineComment
+  skipMany $ try (multiLineComment >> spaces) <|> try (singleLineComment >> spaces)
 
 multiLineComment = do
   string "/*"
@@ -131,7 +135,7 @@ literal =
   try decimalNumeral <|> quotedString <|> boolean
 
 token :: Parser TokenPos
-token = skipMany (comments >> spaces) >> choice
+token = choice
     [ keywords
     , literal
     , ide
@@ -139,6 +143,8 @@ token = skipMany (comments >> spaces) >> choice
     , rbrace
     , lparens
     , rparens
+    , langleBracket
+    , rangleBracket
     , semi
     , dot
     , comma
@@ -149,7 +155,7 @@ token = skipMany (comments >> spaces) >> choice
     ]
 
 tokens :: Parser [TokenPos]
-tokens = spaces *> many (token <* spaces)
+tokens = (spaces >> comments) *> many (token <* (spaces >> comments))
 
 tokenizeFromFile :: FilePath -> IO (Either ParseError [TokenPos])
 tokenizeFromFile fp = E.catch 

@@ -1,7 +1,15 @@
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE RankNTypes #-}
+
 module TypeCheckerTypes
   ( SimpleName (..)
   , QualifiedName (..)
-  , ValidTypeQName (getValidTypeQName)
+  , IValidTypeName (..)
+  , IValidTypeReferenceType (..)
+  , IValidTypeReferenceTypeWrapper(..)
+  , IValidTypeTypeArgument(..)
+  {--, ValidTypeReferenceType(..) -}
+  , ValidTypeWildcardIndicator(..)
   , createQNameObject
   , createQNameInteger
   , createQNameString
@@ -18,15 +26,40 @@ where
 
 import Data.Int
 import qualified Data.Text as T
-import Text.Parsec.Pos
+import Text.Parsec.Pos ( SourcePos )
 import TextShow
 
 data QualifiedName = QualifiedName [T.Text] SimpleName deriving (Eq, Ord)
 
-class ValidTypeQName a where
+class IValidTypeReferenceType a where
+  getValidTypeRefTypeTypeName :: a -> QualifiedName
+
+data IValidTypeReferenceTypeWrapper = forall a. IValidTypeReferenceType a => IValidTypeReferenceTypeWrapper a
+
+class IValidTypeName a where
   getValidTypeQName :: a -> QualifiedName
 
-class TypeInfoClass a
+class IValidTypeTypeArgument a where
+  isExtends :: a -> Bool
+  isSuper :: a -> Bool
+  getTypeArgumentType :: a -> IValidTypeReferenceTypeWrapper
+
+{--
+data ValidTypeTypeArgument = forall b. IValidTypeReferenceType b => 
+  ValidTypeTypeArgument { getValidTypeArgumentWildcard :: Maybe ValidTypeWildcardIndicator
+                        , getValidTypeArgumentValidType :: b
+                        }
+
+data ValidTypeReferenceType = forall b. (ValidType b, Show b) =>
+    ClassReferenceType { getReferenceTypeClassValidType :: b }
+  | TypeVariableReferenceType { getReferenceTypeTypeVariable :: SimpleName
+  }
+
+instance Show ValidTypeReferenceType where
+  show (ClassReferenceType tcvt) = "ClassReferenceType "++show tcvt
+  show (TypeVariableReferenceType sn) = "TypeVariableReferenceType "++show sn
+  -}
+data ValidTypeWildcardIndicator = ValidTypeWildcardIndicatorExtends | ValidTypeWildcardIndicatorSuper deriving (Show, Eq)
 
 newtype SimpleName = SimpleName T.Text deriving (Eq, Ord)
 
@@ -74,6 +107,7 @@ data FieldAccessFlag = FStatic deriving (Enum, Eq, Show)
 
 data MethodAccessFlag = MStatic | MAbstract | MSynthetic | MBridge deriving (Enum, Eq, Show)
 
+{-- Unused parameterized type below -}
 data Abstraction_ n
   = FieldAccess_ SourcePos SimpleName
   | MethodInvocation_ SourcePos Bool SimpleName [Term_ n]

@@ -79,13 +79,13 @@ buildFieldInfo :: ValidTypeField -> ConstantPoolST B.ByteString
 buildFieldInfo ValidTypeField {..} = do
   let (name,_) = vfName
   nameNdx <- addUtf8 (show name)
-  descriptorNdx <- addUtf8 ("L"++show vfType++";")
+  descriptorNdx <- addUtf8 (show vfType)
   return $ toLazyByteString (word16BE 0x0001 <> word16BE nameNdx <> word16BE descriptorNdx <> word16BE 0x0000)
 
 buildMethodInfo :: P.QualifiedName -> TypedMethod -> ConstantPoolST B.ByteString
 buildMethodInfo className method@(NewTypedMethod name params tp maybeMethodImpl) = do
-  let rtrnType = if name == P.createNameInit then "V" else "L"++show tp++";"
-  let descriptor = "("++foldr (\ValidTypeParameter {..} d -> ("L"++show vpType++";")++d) "" params++")"++rtrnType
+  let rtrnType = if name == P.createNameInit then "V" else show tp
+  let descriptor = "("++foldr (\ValidTypeParameter {..} d -> show vpType++d) "" params++")"++rtrnType
   nameNdx <- addUtf8 (show name)
   descriptorNdx <- addUtf8 descriptor
   let accessFlagsBuilder = case maybeMethodImpl of
@@ -174,14 +174,14 @@ generateTermCode' (TypedValue TypedIntegerLiteral {iValue=value}) = do
                    word8 0x13 <> word16BE intNdx <>  -- ldc_w Integer Constant
                    word8 0xb8 <> word16BE methodRef) -- invokestatic MethodRef
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeNameInteger : stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeClassTypeInteger : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedStringLiteral {sValue=value}) = do
   strNdx <- lift $ addString value
   let byteCode = toLazyByteString (
                    word8 0x13 <> word16BE strNdx) -- ldc_w String Constant
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeNameString : stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeClassTypeString : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
   methodRef <- lift $ addMethodRef' P.createQNameBoolean (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)"
@@ -189,7 +189,7 @@ generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
                    (if value then word8 0x04 else word8 0x03) <> -- iconst_1 (true) or iconst_0 (false) 
                    word8 0xb8 <> word16BE methodRef)                           -- invokestatic MethodRef
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeNameBoolean : stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeClassTypeBoolean : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedObjectCreation {ocTyp=vtn@tpVtn, ocParamTyps=targetParamTypes, ocTerms=terms}) = do
   pendingStackMapFrame <- getPossiblePendingStackFrame

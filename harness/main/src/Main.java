@@ -3,6 +3,7 @@
 class Main {
     static Integer java = new Integer(5);
     public static void main(String[] args) {
+        /**
         A a = new A("Bob");
         C c = new C();
         System.out.println(a.getStr());
@@ -21,6 +22,7 @@ class Main {
         System.out.println(c.getString());
         System.out.println(a.staticFieldTest(5));
         System.out.println(a.staticMethodTest());
+         */
     }
 
     Integer a;

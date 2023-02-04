@@ -15,6 +15,7 @@ import qualified Parser as P
 import Data.List (foldl,foldl')
 import TypeValidator
 import TypeInfo (Type(..))
+import qualified Data.Vector as V
 
 data Environment = Environment {variableTypeMap :: Map.Map P.SimpleName Type
                                , variablePositionMap :: Map.Map P.SimpleName Int
@@ -24,7 +25,13 @@ data Environment = Environment {variableTypeMap :: Map.Map P.SimpleName Type
 createMethodEnvironment :: ValidTypeClassData -> ValidTypeClazz -> ValidTypeMethod -> Environment
 createMethodEnvironment typeData clazz@ValidTypeClazz {..} ValidTypeMethod {..} =
   let (superClass, _) = vcParent
-      env = Map.insert P.createNameThis (L vcName)
+      env = Map.insert 
+        P.createNameThis 
+        (L 
+          (LocalCT 
+            (LocalClassType 
+              vcName 
+              (Nothing :: Maybe (V.Vector ClassPathTypeArgument)))))
         $ Map.insert P.createNameSuper (L superClass)
         $ foldr (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (L vpType) env) Map.empty vmParams
       (_, envPos') = foldl' (\(i, env) ValidTypeParameter {..} -> (i+1, Map.insert (fst vpName) i env)) (1, Map.empty) vmParams
@@ -41,7 +48,14 @@ createConstructorEnvironmentRight typeData ValidTypeClazz {..} ValidTypeMethod {
 
 createConstructorEnvironmentLeft :: ValidTypeClassData -> ValidTypeClazz -> Environment
 createConstructorEnvironmentLeft typeData ValidTypeClazz {..} =
-  let env = Map.insert P.createNameThis (L vcName) Map.empty
+  let env = Map.insert 
+              P.createNameThis 
+              (L 
+                (LocalCT 
+                  (LocalClassType 
+                    vcName 
+                    (Nothing :: Maybe (V.Vector ClassPathTypeArgument)))))
+              Map.empty
       envPos = Map.insert P.createNameThis 0 Map.empty in
   Environment {variableTypeMap=env, variablePositionMap=envPos, typeData=typeData}
 

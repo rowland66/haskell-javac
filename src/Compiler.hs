@@ -3,8 +3,12 @@ module Compiler (
 ) where
 
 import qualified Data.Map.Strict as Map
-import Control.Monad (foldM,forM_, when)
+import Control.Monad (foldM,forM_,when)
+import qualified Control.Exception as E
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
 import Control.Monad.Trans.State.Strict (runStateT, evalStateT)
+import Data.Functor.Identity (Identity)
 import Text.Parsec.Error (newErrorMessage, Message(Message))
 import Lexer
 import Parser
@@ -24,7 +28,7 @@ compile :: IO ()
 compile = do
   args <- getArgs
   let (optionMap, fileGlobs) = getCommandLineOptions args
-  srcFiles <- foldM (\l a -> fmap (l ++) (G.glob a)) [] fileGlobs
+  srcFiles <- foldM (\l gp -> fmap (l ++) (G.glob gp)) [] fileGlobs
   classPath <- createClassPath (optionMap Map.! "-cp")
   let maybeDefaultNameToPackageMap = defaultNameToPackageMap classPath
   case maybeDefaultNameToPackageMap of
