@@ -69,8 +69,11 @@ data Clazz = NewClazz SourcePos CompilationUnit QualifiedName [ClassAccessFlag] 
 
 data ClazzMember = ConstructorMember Constructor | FieldMember Field | MethodMember Method deriving Show
 
-data CompilationUnit = CompilationUnit {classpath :: ClassPath, package :: [T.Text], imports :: NameToPackageMap, types :: [Clazz]} deriving Show
+data CompilationUnit = CompilationUnit {classpath :: ClassPath, package :: [T.Text], imports :: NameToPackageMap, types :: [Clazz]}
 
+instance Show CompilationUnit where
+  show CompilationUnit{..} = "Comp Unit"
+  
 sep = T.singleton '/'
 
 parseCompilationUnit :: ClassPath -> NameToPackageMap -> [TokenPos] -> Either ParseError [Clazz]

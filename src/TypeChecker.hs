@@ -21,6 +21,11 @@ module TypeChecker
   , P.deconstructQualifiedName
   , ReferenceType
   , TypedTypeName(..)
+  , getSupertypeSet
+  , isSubtypeOf
+  , resolveTypeArgument
+  , ResolvedReferenceType(..)
+  , ResolvedTypeArgument(..)
   ) where
 
 import Control.Monad.Trans.State.Strict (StateT,get,put,evalStateT,runStateT)
@@ -71,7 +76,7 @@ data TypedValue = TypedVariable {vPosition :: Word8, vTyp :: Type}
                 | TypedIntegerLiteral {iValue :: Int32 }
                 | TypedStringLiteral {sValue :: String }
                 | TypedBooleanLiteral {bValue :: Bool }
-                | TypedObjectCreation {ocTyp :: ValidTypeClassType, ocParamTyps :: [Type], ocTerms :: [TypedTerm]}
+                | TypedObjectCreation {ocTyp :: TypeCheckerClassReferenceTypeWrapper, ocParamTyps :: [Type], ocTerms :: [TypedTerm]}
                 deriving Show
 
 data TypedTerm = TypedValue TypedValue
@@ -81,22 +86,29 @@ data TypedTerm = TypedValue TypedValue
                | TypedConditional TypedTerm TypedTerm TypedTerm Type
                deriving Show
 
-newtype TypedTypeName = TypedTypeName ValidTypeName deriving Show
+newtype TypedTypeName = TypedTypeName TypeCheckerValidTypeQualifiedNameWrapper deriving Show
 
-data TypedReferenceTerm = TypedReferenceTerm ValidTypeClassType TypedTerm deriving Show
+data TypedReferenceTerm = TypedReferenceTerm TypeCheckerClassReferenceTypeWrapper TypedTerm deriving Show
 
-data TypedConstructorInvocation = NewTypedConstructorInvocation ValidTypeName [Type] [TypedTerm] deriving Show
+data TypedConstructorInvocation = NewTypedConstructorInvocation TypeCheckerValidTypeQualifiedNameWrapper [Type] [TypedTerm] deriving Show
 
 data TypedAssignment = NewTypedAssignment TypedTerm TypedTerm deriving Show
 
-data TypedMethod = NewTypedMethod P.SimpleName [ValidTypeParameter] ValidTypeClassType (Maybe TypedMethodImplementation)
+data TypedMethod = NewTypedMethod P.SimpleName [ValidTypeParameter] TypeCheckerClassReferenceTypeWrapper (Maybe TypedMethodImplementation)
                  deriving Show
 
-data TypedClazz = NewTypedClazz [P.ClassAccessFlag] ValidTypeName ValidTypeName [ValidTypeField] [TypedMethod]
+data TypedClazz = NewTypedClazz [P.ClassAccessFlag] TypeCheckerValidTypeQualifiedNameWrapper TypeCheckerValidTypeQualifiedNameWrapper [ValidTypeField] [TypedMethod]
 
 data TypedMethodImplementation = TypedMethodImpl TypedTerm
                                | TypedConstructorImpl TypedConstructorInvocation [TypedAssignment]
                                deriving Show
+
+type TypeParamEnvironment = Map.Map SimpleName ResolvedReferenceType
+
+data ResolvedReferenceType = ResolvedClassRefType !TypeCheckerValidTypeQualifiedNameWrapper !(Maybe (VT.Vector ResolvedTypeArgument))
+                           | ResolvedArrayRefType !ResolvedReferenceType
+
+data ResolvedTypeArgument = ResolvedTypeArgument !(Maybe ValidTypeWildcardIndicator) !ResolvedReferenceType 
 
 init' = T.pack "<init>"
 
@@ -113,12 +125,10 @@ getValidTypeTermPosition (ValidTypeConditional t _ _) = getValidTypeTermPosition
 
 getTypedTermType :: TypedTerm -> Type
 getTypedTermType (TypedValue TypedVariable {vTyp=tp}) = tp
-getTypedTermType (TypedValue TypedIntegerLiteral {}) = L TypeValidator.createValidTypeClassTypeInteger
-getTypedTermType (TypedValue TypedStringLiteral {}) = L TypeValidator.createValidTypeClassTypeString
-getTypedTermType (TypedValue TypedBooleanLiteral {}) = L TypeValidator.createValidTypeClassTypeBoolean
-getTypedTermType (TypedValue TypedObjectCreation {ocTyp=tp}) = case tp of
-  (LocalCT lct) -> L (LocalCT lct)
-  (ClassPathCT cpct) -> L (ClassPathCT cpct)
+getTypedTermType (TypedValue TypedIntegerLiteral {}) = L CP.createValidTypeClassTypeInteger
+getTypedTermType (TypedValue TypedStringLiteral {}) = L CP.createValidTypeClassTypeString
+getTypedTermType (TypedValue TypedBooleanLiteral {}) = L CP.createValidTypeClassTypeBoolean
+getTypedTermType (TypedValue TypedObjectCreation {ocTyp=crtw}) = L crtw
 getTypedTermType (TypedApplication _ TypedFieldAccess {fTyp=tp}) = tp
 getTypedTermType (TypedApplication _ TypedMethodInvocation {mTyp=tp}) = tp
 getTypedTermType (TypedApplication _ TypedSuperMethodInvocation {smTyp=tp}) = tp
@@ -154,10 +164,15 @@ typeCheck' = do
 
 typeCheckValidTypes :: StateT ValidTypeClassData IO (Maybe [TypeError])
 typeCheckValidTypes = do
+  lift $ print "checkForDuplicateTypeErrors"
   result1 <- checkForDuplicateTypeErrors
+  lift $ print "checkForClassInheritenceCycles"
   result3 <- checkForClassInheritenceCycles
+  lift $ print "checkForAbstractClassSubClassErrors"
   result4 <- checkForAbstractClassSubClassErrors
+  lift $ print "checkForNonReturnTypeSubstitutableOverrides"
   result5 <- checkForNonReturnTypeSubstitutableOverrides
+  lift $ print "checkForConstructorsUnassignedFieldErrors"
   result6 <- checkForConstructorsUnassignedFieldErrors
   return $ result1 AP.<|> result3 AP.<|> result4 AP.<|> result5 AP.<|> result6
 
@@ -226,7 +241,7 @@ getType (ValidTypeValue (ValidTypeObjectCreation pos tp params)) = do
         V.Failure typeErrors -> return $ V.Failure typeErrors
         V.Success paramTerms -> do
           let signature = MethodSignature init' (fmap getTypedTermType paramTerms)
-          eitherMethodInvocationExists <- lift $ getMethodDeclaration createClass signature
+          eitherMethodInvocationExists <- lift $ getMethodDeclaration tp signature
           case eitherMethodInvocationExists of
             Left errStr -> return $ V.Failure [TypeError errStr pos]
             Right (MethodDeclaration m) -> do
@@ -240,8 +255,8 @@ getType (ValidTypeCast (ValidTypeRefTypeDeclaration pos tp) t) = do
     V.Failure tes -> return $ V.Failure tes
     V.Success typedTerm -> do
       let typedTermType = getTypedTermType typedTerm
-      termTypeInfo <- lift $ getClassTypeInfo (getBoxedType (getTypedTermType typedTerm))
-      castTypeInfo <- lift $ getClassTypeInfo tp
+      let termTypeInfo = getBoxedType (getTypedTermType typedTerm)
+      let castTypeInfo = tp
       isSubtype <- lift $ isSubtypeOf castTypeInfo termTypeInfo
       if isSubtype
         then return $ V.Success (TypedCast (TypedReferenceTerm tp typedTerm))
@@ -260,8 +275,14 @@ getType (ValidTypeApplication (ValidTypeApplicationTargetTerm t) (ValidTypeField
           Just (FieldDeclaration f) -> do
             let tp = getFieldType f
             if faStatic (getFieldAttributes f)
-              then return $ V.Success (TypedStaticApplication (TypedTypeName (getErasedTypeName termTypeName)) (TypedStaticFieldAccess {tfName=nm,tfTyp=tp}))
+              then return $
+                V.Success
+                  (TypedStaticApplication
+                    (TypedTypeName
+                      (getErasedTypeName termTypeName))
+                    (TypedStaticFieldAccess {tfName=nm,tfTyp=tp}))
               else return $ V.Success (TypedApplication (TypedReferenceTerm termTypeName typedTerm) (TypedFieldAccess {fName=nm,fTyp=tp}))
+      T sn -> undefined
       _ -> return $ V.Failure [TypeError "term with primitive type cannot be dereferenced" pos]
 
 getType (ValidTypeApplication (ValidTypeApplicationTargetTerm t) (ValidTypeMethodInvocation pos nm params)) = do
@@ -273,20 +294,19 @@ getType (ValidTypeApplication (ValidTypeApplicationTargetTerm t) (ValidTypeMetho
     V.Success (typedTerm,paramTerms) -> do
       let signature = MethodSignature (P.deconstructSimpleName nm) (fmap getTypedTermType paramTerms)
       case getTypedTermType typedTerm of
-        L termTypeName -> do
-          termType <- lift $ getClassTypeInfo termTypeName
-          eitherMethodType <- lift $ getMethodDeclaration termType signature
+        L crtw -> do
+          eitherMethodType <- lift $ getMethodDeclaration crtw signature
           case eitherMethodType of
             Left errStr -> return $ V.Failure [TypeError errStr pos]
             Right (MethodDeclaration m) ->
               if maStatic (getMethodAttributes m)
               then return $ V.Success
                 (TypedStaticApplication
-                  (TypedTypeName (getErasedTypeName termTypeName))
+                  (TypedTypeName (getErasedTypeName crtw))
                   (TypedStaticMethodInvocation {tmName=nm,tmTyp=getMethodType m,tmParamTyps=getMethodParams m,tmTerms=paramTerms}))
               else return $ V.Success
                 (TypedApplication
-                  (TypedReferenceTerm termTypeName typedTerm)
+                  (TypedReferenceTerm crtw typedTerm)
                   (TypedMethodInvocation {mName=nm,mTyp=getMethodType m,mParamTyps=getMethodParams m,mTerms=paramTerms}))
         _ -> return $ V.Failure [TypeError "term with primitive type cannot be dereferenced" pos]
 
@@ -302,8 +322,7 @@ getType (ValidTypeApplication (ValidTypeApplicationTargetTerm t) (ValidTypeSuper
         L termTypeName -> do
           (TypeInfo termType) <- lift $ getClassTypeInfo termTypeName
           let parent = getTypeParent termType
-          termParentType <- lift $ getClassTypeInfo parent
-          eitherMethodType <- lift $ getMethodDeclaration termParentType signature
+          eitherMethodType <- lift $ getMethodDeclaration parent signature
           case eitherMethodType of
             Left errStr -> return $ V.Failure [TypeError errStr pos]
             Right (MethodDeclaration m) -> if maStatic (getMethodAttributes m)
@@ -324,20 +343,20 @@ getType (ValidTypeApplication (ValidTypeApplicationTargetTypeName tn@(ValidTypeR
           then return $ V.Success (TypedStaticApplication (TypedTypeName (getErasedTypeName vtn)) (TypedStaticFieldAccess {tfName=nm,tfTyp=getFieldType f}))
           else return $ V.Failure [TypeError ("non-static field "++show (getFieldName f)++" cannot be referenced from a static context") pos]
 
-getType (ValidTypeApplication (ValidTypeApplicationTargetTypeName tn@(ValidTypeRefTypeDeclaration tnPos vtn)) (ValidTypeMethodInvocation pos nm params)) = do
+getType (ValidTypeApplication (ValidTypeApplicationTargetTypeName tn@(ValidTypeRefTypeDeclaration tnPos crtw)) (ValidTypeMethodInvocation pos nm params)) = do
   paramTypedTermsV <- sequenceA <$> mapM getType params
   case paramTypedTermsV of
     V.Failure tes -> return $ V.Failure tes
     V.Success paramTypedTerms -> do
       let signature = MethodSignature (P.deconstructSimpleName nm) (fmap getTypedTermType paramTypedTerms)
-      typeNameTypeInfo <- lift $ getClassTypeInfo vtn
-      eitherMethodInvocation <- lift $ getMethodDeclaration typeNameTypeInfo signature
+      typeNameTypeInfo <- lift $ getClassTypeInfo crtw
+      eitherMethodInvocation <- lift $ getMethodDeclaration crtw signature
       case eitherMethodInvocation of
         Left errStr -> return $ V.Failure [TypeError errStr pos]
         Right (MethodDeclaration m) -> if maStatic (getMethodAttributes m)
           then return $ V.Success
             (TypedStaticApplication
-              (TypedTypeName (getErasedTypeName vtn)) (TypedStaticMethodInvocation {tmName=nm,
+              (TypedTypeName (getErasedTypeName crtw)) (TypedStaticMethodInvocation {tmName=nm,
                                                                 tmTyp=getMethodType m,
                                                                 tmParamTyps=getMethodParams m,
                                                                 tmTerms=paramTypedTerms}))
@@ -381,7 +400,7 @@ getDuplicateFields ValidTypeClazz {..} =
 
 getDuplicateMethods :: ValidTypeClazz -> [TypeError]
 getDuplicateMethods ValidTypeClazz {..} =
-  snd $ foldr 
+  snd $ foldr
     (\method@ValidTypeMethod {..} (methodMap, duplicateList) ->
       let (nm,pos) = vmName in
       (case Map.lookup nm methodMap of
@@ -395,11 +414,11 @@ getDuplicateMethods ValidTypeClazz {..} =
 getClassInheritenceCycleErrors :: ValidTypeClazz -> StateT ValidTypeClassData IO [TypeError]
 getClassInheritenceCycleErrors clazz = getClassInheritenceCycleErrors' clazz []
 
-getClassInheritenceCycleErrors' :: ValidTypeClazz -> [ValidTypeName] -> StateT ValidTypeClassData IO [TypeError]
+getClassInheritenceCycleErrors' :: ValidTypeClazz -> [TypeCheckerValidTypeQualifiedNameWrapper] -> StateT ValidTypeClassData IO [TypeError]
 getClassInheritenceCycleErrors' ValidTypeClazz {..} classes = do
   (_,classMap) <- get
   let (parent,pos) = vcParent
-      parentName = getErasedTypeName parent 
+      parentName = getErasedTypeName parent
     in
       if parentName `elem` classes
         then return [TypeError ("Cyclic Inheritence: "++show vcName) pos]
@@ -434,7 +453,7 @@ getMethodTermTypeErrors cls@ValidTypeClazz {..} method@ValidTypeMethod {vmMaybeI
     case typedTermV of
       V.Failure tes -> return $ V.Failure tes
       V.Success typedTerm -> do
-        ifM (isSubtypeOf' (getBoxedType (getTypedTermType typedTerm)) vmType)
+        ifM (isSubtypeOf (getBoxedType (getTypedTermType typedTerm)) vmType)
           (return $ V.Success (NewTypedMethod methodName (VT.toList vmParams) vmType (Just (TypedMethodImpl typedTerm))))
           (return $ V.Failure [TypeError ("Incorrect return type: "++show (getTypedTermType typedTerm)) pos])
 getMethodTermTypeErrors cls@ValidTypeClazz {..} method@ValidTypeMethod {vmMaybeImpl=Just ValidTypeConstructorImplementation{..},..} = do
@@ -455,15 +474,15 @@ getMethodTermTypeErrors cls@ValidTypeClazz {..} method@ValidTypeMethod {vmMaybeI
       case tupleV of
         V.Failure tes -> return $ V.Failure tes
         V.Success (typedThisCI, typedAssignments) -> return $ V.Success
-          (NewTypedMethod P.createNameInit (VT.toList vmParams) TypeValidator.createValidTypeClassTypeObject (Just (TypedConstructorImpl typedThisCI typedAssignments)))
+          (NewTypedMethod P.createNameInit (VT.toList vmParams) CP.createValidTypeClassTypeObject (Just (TypedConstructorImpl typedThisCI typedAssignments)))
     Right typedSuperCIV -> do
       let tupleV = (,) <$> typedSuperCIV <*> typedAssignmentsV
       case tupleV of
         V.Failure tes -> return $ V.Failure tes
         V.Success (typedSuperCI,typedAssignments) -> return $ V.Success
-          (NewTypedMethod P.createNameInit (VT.toList vmParams) TypeValidator.createValidTypeClassTypeObject (Just (TypedConstructorImpl typedSuperCI typedAssignments)))
+          (NewTypedMethod P.createNameInit (VT.toList vmParams) CP.createValidTypeClassTypeObject (Just (TypedConstructorImpl typedSuperCI typedAssignments)))
 
-defaultConstructorInvocation :: ValidTypeName -> TypedConstructorInvocation
+defaultConstructorInvocation :: TypeCheckerValidTypeQualifiedNameWrapper -> TypedConstructorInvocation
 defaultConstructorInvocation parentCls = NewTypedConstructorInvocation parentCls [] []
 
 getAbstractClassSubClassErrors :: ValidTypeClazz -> StateT ValidTypeClassData IO [TypeError]
@@ -474,25 +493,28 @@ getAbstractClassSubClassErrors cls = do
     Right _ -> return []
 
 getAbstractClassSubClassErrors' :: ValidTypeClazz -> ExceptT [TypeError] (StateT ValidTypeClassData IO) ()
-getAbstractClassSubClassErrors' cls@ValidTypeClazz {..} = do
-  if P.CAbstract `elem` vcAccessFlags then return () else do
-    parentClasses <- lift $ getSupertypeSet (LocalCT (LocalClassType vcName (Nothing :: Maybe (VT.Vector CP.ClassPathTypeArgument ))))
-    parentClassesTI <- lift $ mapM getClassTypeInfo parentClasses
-    reducedMethods <- lift $ foldM combineMethodDeclList [] (reverse parentClassesTI)
-    let abstractMethods = filter (\(MethodDeclaration m) -> maAbstract (getMethodAttributes m)) reducedMethods
-    if null abstractMethods
-      then return ()
-      else throwE [TypeError "Class does not implement abstract methods" vcSourcePos]
+getAbstractClassSubClassErrors' cls@ValidTypeClazz {..} =
+  if P.CAbstract `elem` vcAccessFlags 
+    then return () 
+    else do
+      classTI <- lift $ getClassTypeInfo' vcName
+      parentClasses <- lift $ getSupertypeSet (fst vcParent)
+      parentClassesTI <- lift $ mapM getClassTypeInfo parentClasses
+      let reducedMethods = List.foldl' combineMethodDeclList [] (classTI:parentClassesTI)
+      let abstractMethods = filter (\(MethodDeclaration m) -> maAbstract (getMethodAttributes m)) reducedMethods
+      if null abstractMethods
+        then return ()
+        else throwE [TypeError "Class does not implement abstract methods" vcSourcePos]
 
-combineMethodDeclList ::  [MethodDeclaration] -> TypeInfo -> StateT ValidTypeClassData IO [MethodDeclaration]
+combineMethodDeclList ::  [MethodDeclaration] -> TypeInfo -> [MethodDeclaration]
 combineMethodDeclList list (TypeInfo tp) = do
   let tpList = getTypeMethods tp
-  unionByM methodDeclEq list tpList
+  List.unionBy methodDeclEq list tpList
 
-methodDeclEq :: MethodDeclaration -> MethodDeclaration -> StateT ValidTypeClassData IO Bool
+methodDeclEq :: MethodDeclaration -> MethodDeclaration ->  Bool
 methodDeclEq (MethodDeclaration m1)
              (MethodDeclaration m2) =
-  return $ getMethodName m1 == getMethodName m2 && getMethodParams m1 == getMethodParams m2
+  getMethodName m1 == getMethodName m2 && getMethodParams m1 == getMethodParams m2
 
 getNonReturnTypeSubstitutableOverrideErrors :: ValidTypeClazz -> StateT ValidTypeClassData IO [TypeError]
 getNonReturnTypeSubstitutableOverrideErrors cls = do
@@ -505,7 +527,7 @@ getNonReturnTypeSubstitutableOverrideErrors' :: ValidTypeClazz -> ExceptT [TypeE
 getNonReturnTypeSubstitutableOverrideErrors' cls@ValidTypeClazz {..} = do
   parentClasses <- lift $ getSupertypeSet (fst vcParent)
   parentClassesTI <- lift $ mapM getClassTypeInfo parentClasses
-  reducedMethods <- lift $ foldM combineMethodDeclList [] (reverse parentClassesTI)
+  let reducedMethods = List.foldl' combineMethodDeclList [] parentClassesTI
   let nonConstructorMethods = filter (\ValidTypeMethod {..} -> fst vmName /= P.createNameInit) vcMethods
   errorList <- lift $ foldM (\errors m -> (errors++) <$> isMethodOverrideNotReturnTypeSubstitutable reducedMethods m) [] nonConstructorMethods
   case errorList of
@@ -523,7 +545,7 @@ isMethodOverrideNotReturnTypeSubstitutable superClassMethods method@ValidTypeMet
       let tp = getMethodType m
       if not (isTypeSupported tp)
         then return [TypeError "Method override of unsupported primitive return type" pos]
-        else ifM (isSubtypeOf' vmType (getBoxedType tp))
+        else ifM (isSubtypeOf vmType (getBoxedType tp))
           (return [])
           (return [TypeError "Method override with incompatible return type" pos])
 
@@ -537,7 +559,7 @@ getAssignmentTypeError lenv renv ValidTypeAssignment {..} = do
   case termTupleV of
     V.Failure tes -> return $ V.Failure tes
     V.Success (leftTermType,rightTermType) -> do
-      isSubtype <- isSubtypeOf' (getBoxedType (getTypedTermType rightTermType)) (getBoxedType (getTypedTermType leftTermType))
+      isSubtype <- isSubtypeOf (getBoxedType (getTypedTermType rightTermType)) (getBoxedType (getTypedTermType leftTermType))
       if isTermValidForLeftAssignment vaLeftHandTerm && isSubtype
         then return $ V.Success (NewTypedAssignment leftTermType rightTermType)
         else return $ V.Failure [TypeError "Illegal assignment" (getValidTypeTermPosition vaRightHandTerm)]
@@ -557,8 +579,10 @@ getTypedConstructorInvocation  cls@ValidTypeClazz {..} (ValidTypeConstructorInvo
     V.Failure tes -> return $ V.Failure tes
     V.Success typedTerms -> do
       let signature = MethodSignature init' (fmap getTypedTermType typedTerms)
-      typeInfo <- lift $ getClassTypeInfo (LocalCT (LocalClassType vcName (Nothing :: Maybe (VT.Vector CP.ClassPathTypeArgument ))))
-      eitherThisConstructor <- lift $ getMethodDeclaration typeInfo signature
+      let crtw = TypeCheckerClassReferenceTypeWrapper
+                   vcName
+                   Nothing
+      eitherThisConstructor <- lift $ getMethodDeclaration crtw signature
       case eitherThisConstructor of
         Left errStr -> return $ V.Failure [TypeError ("No invocation compatible constructor: "++show vcName++"."++show signature) pos]
         Right (MethodDeclaration m) ->
@@ -573,11 +597,10 @@ getTypedSuperConstructorInvocation  cls@ValidTypeClazz {..} (ValidTypeSuperConst
   case typedTermsV of
     V.Failure tes -> return $ V.Failure tes
     V.Success typedTerms -> do
-      let (parentClass, _) = vcParent
-      let parentClassName = getErasedTypeName parentClass
+      let (parentCrtw, _) = vcParent
+      let parentClassName = getErasedTypeName parentCrtw
       let signature = MethodSignature init' (fmap getTypedTermType typedTerms)
-      parentTypeInfo <- lift $ getClassTypeInfo parentClass
-      eitherSuperConstructor <- lift $ getMethodDeclaration parentTypeInfo signature
+      eitherSuperConstructor <- lift $ getMethodDeclaration parentCrtw signature
       case eitherSuperConstructor of
         Left errStr -> return $ V.Failure [TypeError ("No invocation compatible constructor: "++show vcName++"."++show signature) pos]
         Right (MethodDeclaration m) ->
@@ -609,17 +632,17 @@ getAssignmentTermField (ValidTypeApplication (ValidTypeApplicationTargetTerm (Va
 getAssignmentTermField (ValidTypeApplication (ValidTypeApplicationTargetTerm innerApplication@(ValidTypeApplication _ _)) _) = getAssignmentTermField innerApplication
 getAssignmentTermField _ = Nothing
 
-leastUpperBound :: [ValidTypeClassType] -> StateT ValidTypeClassData IO Type
+leastUpperBound :: [TypeCheckerClassReferenceTypeWrapper] -> StateT ValidTypeClassData IO Type
 leastUpperBound typeList = do
   st <- mapM getSupertypeSet typeList
   let ec = List.nub (List.foldl' List.intersect [] st)
   maybeLub <-foldM (\mec tp -> case mec of
                             Nothing -> return $ Just tp
-                            Just tp' -> ifM (isSubtypeOf' tp tp') (return (Just tp)) (return (Just tp')))
+                            Just tp' -> ifM (isSubtypeOf tp tp') (return (Just tp)) (return (Just tp')))
     Nothing
     ec
   case maybeLub of
-    Nothing -> return $ L TypeValidator.createValidTypeClassTypeObject
+    Nothing -> return $ L CP.createValidTypeClassTypeObject
     Just lub -> return $ L lub
 
 getFieldDeclaration :: TypeInfo -> P.SimpleName -> StateT ValidTypeClassData IO (Maybe FieldDeclaration)
@@ -628,73 +651,114 @@ getFieldDeclaration ti@(TypeInfo t) nm = do
   case maybeFd of
     Just fd -> return $ Just fd
     Nothing ->
-      if getTypeName t == getErasedTypeName TypeValidator.createValidTypeClassTypeObject
+      if getTypeName t == getErasedTypeName CP.createValidTypeClassTypeObject
         then return Nothing
         else do
           parentType <- getClassTypeInfo (getTypeParent t)
           getFieldDeclaration parentType nm
 
-getMethodDeclaration :: TypeInfo -> MethodSignature -> StateT ValidTypeClassData IO (Either String MethodDeclaration)
-getMethodDeclaration ti signature@(MethodSignature nm _) = do
-  mdList <- getApplicableMethods ti signature
+{--
+Resolve an appropriate method for a method invocation expression (MethodSignature).
+Logic derived from JLS 15.12
+-}
+getMethodDeclaration :: TypeCheckerClassReferenceTypeWrapper -> MethodSignature -> StateT ValidTypeClassData IO (Either String MethodDeclaration)
+getMethodDeclaration crtw signature@(MethodSignature nm _) = do
+  mdList <- getApplicableMethods crtw signature
   case mdList of
     [] -> return $ Left ("no suitable method found for "++show signature)
     _ -> do
-      result <- getMostSpecificMethod mdList
+      result <- getMostSpecificMethod crtw mdList
       case result of
         Nothing -> return $ Left ("reference to "++show nm++" is ambiguous")
         Just md -> return $ Right md
 
-getMostSpecificMethod :: [MethodDeclaration] -> StateT ValidTypeClassData IO (Maybe MethodDeclaration)
-getMostSpecificMethod mdList = do
+{--
+Given a list of class methods, select the method that is most specific. The list of methods will be the result of a selction
+process in which potentially applicable methods for a given method invocation are selected. Logic derived form JLS 15.12.2.5
+-}
+getMostSpecificMethod :: TypeCheckerClassReferenceTypeWrapper -> [MethodDeclaration] -> StateT ValidTypeClassData IO (Maybe MethodDeclaration)
+getMostSpecificMethod crtw mdList = do
   foldM foldFunc Nothing mdList
   where
     foldFunc result md =
       case result of
-        r@(Just _) -> return r
+        r@(Just _) -> return r -- once a most specific method has been found, we are done
         Nothing -> do
           ifM (isMostSpecific md) (return (Just md)) (return Nothing)
-    isMostSpecific (MethodDeclaration m) =
-      and <$> mapM (\candidate -> ifM (isMethodApplicableByLooseInvocation candidate (getErasedMethodSignature m)) (return True) (return False)) mdList
+    isMostSpecific md =
+      and <$> mapM
+        (\candidate ->
+          ifM
+            (isMethodApplicableByLooseInvocation' crtw candidate md)
+            (return True)
+            (return False))
+        mdList
+    isMethodApplicableByLooseInvocation' :: TypeCheckerClassReferenceTypeWrapper -> MethodDeclaration -> MethodDeclaration -> StateT ValidTypeClassData IO Bool
+    isMethodApplicableByLooseInvocation' crtw@(TypeCheckerClassReferenceTypeWrapper _ maybeTypeArguments) md md'@(MethodDeclaration m') = do
+      tiw@(TypeInfo ti) <- getClassTypeInfo crtw
+      let paramaterizedTypeEnvMap = case maybeTypeArguments of
+            Nothing -> Map.empty
+            Just typeArgs -> buildParameterizedTypeEnvironmentMap tiw (VT.toList typeArgs)
+      let ms = MethodSignature (showt (getMethodName m')) (getSignatureWithResolvedTypeParams paramaterizedTypeEnvMap md')
+      isMethodApplicableByLooseInvocation paramaterizedTypeEnvMap md ms
 
-getApplicableMethods :: TypeInfo -> MethodSignature -> StateT ValidTypeClassData IO [MethodDeclaration]
-getApplicableMethods ti signature = do
-  pams <- getPotentiallyApplicableMethods ti signature
-  filterM (`isMethodApplicableByLooseInvocation` signature) pams
+getApplicableMethods :: TypeCheckerClassReferenceTypeWrapper -> MethodSignature -> StateT ValidTypeClassData IO [MethodDeclaration]
+getApplicableMethods crtw@(TypeCheckerClassReferenceTypeWrapper _ maybeTypeArguments) signature = do
+  tiw@(TypeInfo ti) <- getClassTypeInfo crtw
+  let !z = trace("type args: "++show maybeTypeArguments) 1
+  let paramaterizedTypeEnvMap = case maybeTypeArguments of
+        Nothing -> Map.empty
+        Just typeArgs -> buildParameterizedTypeEnvironmentMap tiw (VT.toList typeArgs)
+  pams <- getPotentiallyApplicableMethods tiw signature
+  let !z' = trace ("pams: "++show (length pams)) 1
+  filterM (\md -> isMethodApplicableByLooseInvocation paramaterizedTypeEnvMap md signature) pams
 
-isMethodApplicableByLooseInvocation :: MethodDeclaration -> MethodSignature -> StateT ValidTypeClassData IO Bool
-isMethodApplicableByLooseInvocation (MethodDeclaration m) signature@(MethodSignature searchName searchParams) = do
-    let !z = trace ("signature: "++show signature) 1
-    areParametersInvocationCompatible (fmap (L . getBoxedType) searchParams) (getErasedMethodParams m)
+isMethodApplicableByLooseInvocation :: ParamaterizedTypeEnvironmentMap -> MethodDeclaration -> MethodSignature -> StateT ValidTypeClassData IO Bool
+isMethodApplicableByLooseInvocation paramaterizedTypeEnvMap md signature@(MethodSignature searchName searchParams) = do
+    let !z = trace ("signature: "++show signature++"--"++show paramaterizedTypeEnvMap) 1
+    let substitutedParams = getSignatureWithResolvedTypeParams paramaterizedTypeEnvMap md
+    let !z' = trace ("env:"++show substitutedParams) 1
+    areParametersInvocationCompatible (fmap (L . getBoxedType) searchParams) substitutedParams
   where
     areParametersInvocationCompatible :: [Type] -> [Type] -> StateT ValidTypeClassData IO Bool
     areParametersInvocationCompatible sigParamTypes candidateParams = do
-      let !x = trace ("areParametersInvocationCompatible "++show sigParamTypes++" - "++show candidateParams) 1
-      foldM (\r (ptp, candidatetp) ->
-        (r &&) <$> isTypeInvocationCompatible ptp candidatetp) True (zip sigParamTypes candidateParams)
+      result <- foldM (\r (ptp, candidatetp) ->
+        (r &&) <$> isTypeInvocationCompatible ptp candidatetp) 
+        True 
+        (zip sigParamTypes candidateParams)
+      let !x = trace ("areParametersInvocationCompatible "++show sigParamTypes++" - "++show candidateParams++" -> "++show result) 1
+      return result
+
     isTypeInvocationCompatible :: Type -> Type -> StateT ValidTypeClassData IO Bool
-    isTypeInvocationCompatible (L baseType) I = isSubtypeOf' baseType TypeValidator.createValidTypeClassTypeInteger
-    isTypeInvocationCompatible (L baseType) Z = isSubtypeOf' baseType TypeValidator.createValidTypeClassTypeBoolean
-    isTypeInvocationCompatible (L baseType) (L vtn) = isSubtypeOf' baseType vtn
+    isTypeInvocationCompatible (L baseType) I = isSubtypeOf baseType CP.createValidTypeClassTypeInteger
+    isTypeInvocationCompatible (L baseType) Z = isSubtypeOf baseType CP.createValidTypeClassTypeBoolean
+    isTypeInvocationCompatible (L baseType) (L vtn) = isSubtypeOf baseType vtn
     isTypeInvocationCompatible _ _ = return False
 
-getPotentiallyApplicableMethods :: TypeInfo -> MethodSignature -> StateT ValidTypeClassData IO [MethodDeclaration]
-getPotentiallyApplicableMethods = getPotentiallyApplicableMethods' []
+getPotentiallyApplicableMethods :: TypeInfo ->
+                                   MethodSignature ->
+                                   StateT ValidTypeClassData IO [MethodDeclaration]
+getPotentiallyApplicableMethods ti methodSig = do
+  fmap snd <$> getPotentiallyApplicableMethods' [] ti methodSig
 
-getPotentiallyApplicableMethods' :: [MethodDeclaration] -> TypeInfo -> MethodSignature -> StateT ValidTypeClassData IO [MethodDeclaration]
-getPotentiallyApplicableMethods' mdList (TypeInfo t) sig = do
+getPotentiallyApplicableMethods' :: [(MethodSignature,MethodDeclaration)] -> TypeInfo -> MethodSignature -> StateT ValidTypeClassData IO [(MethodSignature,MethodDeclaration)]
+getPotentiallyApplicableMethods' mdList ti@(TypeInfo t) sig = do
   mdList' <- getTypePotentiallyApplicableMethods t sig
-  let mdList'' = List.foldl' (\l md@(MethodDeclaration md'') ->
-        if any (\(MethodDeclaration md') -> isSubSignature (getMethodSignature md') (MethodDeclaration md'')) l
-          then l
-          else md:l) mdList mdList'
-  let !x = trace (show sig++"::"++show (getTypeName t)++show (fmap (\(MethodDeclaration m) -> show m) mdList'')) 1
-  if getTypeName t == getErasedTypeName TypeValidator.createValidTypeClassTypeObject
+  let mdList'' =
+        List.foldl' (\l md@(MethodDeclaration md'') ->
+          if any (\(methodSig,_) -> isSubSignature methodSig (MethodDeclaration md'')) l
+            then l
+            else (getErasedMethodSignature md,md):l)
+          mdList
+          mdList'
+  let !x = trace ("getPotentiallyApplicableMethods@@" ++ show sig++"::"++show (getTypeName t)++show (fmap (\(_,(MethodDeclaration m)) -> show m) mdList'')) 1
+  if getTypeName t == getErasedTypeName CP.createValidTypeClassTypeObject
     then return mdList''
     else do
       parentType <- getClassTypeInfo (getTypeParent t)
       getPotentiallyApplicableMethods' mdList'' parentType sig
 
+object :: T.Text
 object = T.pack "java/lang/Object"
 rparens = T.pack ")"
 semi = T.pack ";"
@@ -714,14 +778,15 @@ mapParameterToType ValidTypeParameter {..} = L vpType
      - the signature of m1 is the same as the erasure (§4.6) of the signature of m2.
 -}
 isSubSignature :: MethodSignature -> MethodDeclaration -> Bool
-isSubSignature m1 (MethodDeclaration m2) = m1 == getErasedMethodSignature m2 
+isSubSignature m1 m2 = trace ("erased signature is: "++show (getErasedMethodSignature m2)) m1 == getErasedMethodSignature m2
 
-isConcreteClass :: ValidTypeClassType -> StateT ValidTypeClassData IO Bool
+
+isConcreteClass :: TypeCheckerClassReferenceTypeWrapper -> StateT ValidTypeClassData IO Bool
 isConcreteClass tp = do
   (TypeInfo typeInfo) <- getClassTypeInfo tp
   return $ not (caAbstract (getTypeAccessFlags typeInfo))
 
-isInterface :: ValidTypeClassType -> StateT ValidTypeClassData IO Bool
+isInterface :: TypeCheckerClassReferenceTypeWrapper -> StateT ValidTypeClassData IO Bool
 isInterface tp = do
   (TypeInfo typeInfo) <- getClassTypeInfo tp
   return $ caInterface (getTypeAccessFlags typeInfo)
@@ -734,38 +799,101 @@ isTypeInteger :: Type -> Bool
 isTypeInteger I = True
 isTypeInteger _ = False
 
-getBoxedType :: Type -> ValidTypeClassType
-getBoxedType I = TypeValidator.createValidTypeClassTypeInteger
-getBoxedType Z = TypeValidator.createValidTypeClassTypeBoolean
+getBoxedType :: Type -> TypeCheckerClassReferenceTypeWrapper
+getBoxedType I = CP.createValidTypeClassTypeInteger
+getBoxedType Z = CP.createValidTypeClassTypeBoolean
 getBoxedType tp@(L vtn) = vtn
 getBoxedType t = trace ("getBoxedType with invalid type: "++show t) undefined
 
 getUnboxedType :: Type -> Type
-getUnboxedType (L vtn) | vtn == TypeValidator.createValidTypeClassTypeBoolean = Z
-                       | vtn == TypeValidator.createValidTypeClassTypeInteger = I
+getUnboxedType (L vtn) | vtn == CP.createValidTypeClassTypeBoolean = Z
+                       | vtn == CP.createValidTypeClassTypeInteger = I
 getUnboxedType t = t
 
-getSupertypeSet :: ValidTypeClassType -> StateT ValidTypeClassData IO [ValidTypeClassType]
-getSupertypeSet tp = unfoldrM (\case
-    Just vtn -> fmap (\(TypeInfo ti) -> Just (vtn, if vtn == TypeValidator.createValidTypeClassTypeObject
-                                          then Nothing
-                                          else Just (getTypeParent ti)))
-                (getClassTypeInfo vtn);
-    Nothing -> return Nothing
-  )
-  (Just tp)
+{-- First parameter will be includeded in the list -}
+getSupertypeSet :: TypeCheckerClassReferenceTypeWrapper -> StateT ValidTypeClassData IO [TypeCheckerClassReferenceTypeWrapper]
+getSupertypeSet crtw = do
+  listWithoutObject <- unfoldrM
+      (\crtw' ->
+        fmap
+          (\(TypeInfo ti) -> if crtw' == CP.createValidTypeClassTypeObject
+                            then Nothing
+                            else Just (crtw', getTypeParent ti))
+          (getClassTypeInfo crtw'))
+      crtw
+  return $ reverse $ CP.createValidTypeClassTypeObject:listWithoutObject
 
-{--
-isSubtypeOf' :: ValidTypeName -> ValidTypeName -> StateT ValidTypeClassData IO Bool
-isSubtypeOf' childType parentType = do
-  childTI <- getClassTypeInfo childType
-  parentTI <- getClassTypeInfo parentType
-  isSubtypeOf childTI parentTI
--}
+isSubtypeOf :: TypeCheckerClassReferenceTypeWrapper -> TypeCheckerClassReferenceTypeWrapper -> StateT ValidTypeClassData IO Bool
+isSubtypeOf childCrtw@(TypeCheckerClassReferenceTypeWrapper childQn maybeChildTypeArgs) 
+            parentCrtw@(TypeCheckerClassReferenceTypeWrapper parentQn maybeParentTypeArgs) = do
+  (TypeInfo childTI) <- getClassTypeInfo' childQn
+  (TypeInfo parentTI) <- getClassTypeInfo' parentQn
+  let childImplements =
+        fmap
+          (\crtw -> crtw)
+          (getTypeImplements childTI)
+  isSubtype <- (getTypeName childTI == getTypeName parentTI ||) <$>
+    foldM (\r crtw -> if r then return r else isSubtypeOf crtw parentCrtw) False childImplements
+  if isSubtype
+    then return True
+    else do
+      let childParentClassRefWrapper = getTypeParent childTI
+      if childParentClassRefWrapper == childCrtw -- Only java/lang/Object has itself as a parent
+        then return False
+        else do
+          isSubtypeOf childParentClassRefWrapper parentCrtw
 
-isSubtypeOf' :: ValidTypeClassType -> ValidTypeClassType -> StateT ValidTypeClassData IO Bool
-isSubtypeOf' childType parentType = do
-  childTI <- getClassTypeInfo childType
-  parentTI <- getClassTypeInfo parentType
-  isSubtypeOf childTI parentTI
+containsTypeArgument :: TypeCheckerTypeArgument -> TypeCheckerTypeArgument -> StateT ValidTypeClassData IO Bool
+containsTypeArgument t1@(TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorExtends) t1Rtw) 
+                     t2@(TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorExtends) t2Rtw) = 
+  let t1crtw = case getTypeCheckerReferenceTypeClass t1Rtw of
+                 Just crtw -> crtw
+                 Nothing -> undefined
+      t2crtw = case getTypeCheckerReferenceTypeClass t2Rtw of
+                 Just crtw -> crtw
+                 Nothing -> undefined
+  in
+    isSubtypeOf t2crtw t1crtw
 
+containsTypeArgument t1@(TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorSuper) t1Rtw) 
+                     t2@(TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorSuper) t2Rtw) = 
+  let t1crtw = case getTypeCheckerReferenceTypeClass t1Rtw of
+                 Just crtw -> crtw
+                 Nothing -> undefined
+      t2crtw = case getTypeCheckerReferenceTypeClass t2Rtw of
+                 Just crtw -> crtw
+                 Nothing -> undefined
+  in
+    isSubtypeOf t1crtw t2crtw 
+
+containsTypeArgument t1@(TypeCheckerTypeArgument Nothing t1Rtw) 
+                     t2@(TypeCheckerTypeArgument Nothing t2Rtw) = 
+  let t1crtw = case getTypeCheckerReferenceTypeClass t1Rtw of
+                 Just crtw -> crtw
+                 Nothing -> undefined
+      t2crtw = case getTypeCheckerReferenceTypeClass t2Rtw of
+                 Just crtw -> crtw
+                 Nothing -> undefined
+  in
+    return $ t1crtw == t2crtw
+
+containsTypeArgument _ _ = return False
+
+resolveTypeArgument :: TypeCheckerTypeArgument -> TypeParamEnvironment -> ResolvedTypeArgument
+resolveTypeArgument (TypeCheckerTypeArgument wildcardIndicator rtw) env =
+  case getTypeCheckerReferenceTypeClass rtw of
+    Just crtw@(TypeCheckerClassReferenceTypeWrapper qn maybeTypeArgs) -> 
+      case maybeTypeArgs of
+        Nothing -> ResolvedTypeArgument wildcardIndicator (ResolvedClassRefType qn Nothing)
+        Just typeArgs -> ResolvedTypeArgument
+          wildcardIndicator
+          (ResolvedClassRefType qn (Just (fmap (\ta -> resolveTypeArgument ta env) typeArgs)))
+    Nothing -> case getTypeCheckerReferenceTypeTypeVariable rtw of
+      Just typeVariable -> case env Map.!? typeVariable of
+        Nothing -> error ("undefined type variable"++show typeVariable)
+        Just typeVariableResolvedRefType -> case typeVariableResolvedRefType of
+          rta@(ResolvedClassRefType _ _) -> ResolvedTypeArgument Nothing rta
+          rta@(ResolvedArrayRefType _) -> ResolvedTypeArgument Nothing rta
+      Nothing -> case getTypeCheckerReferenceTypeArray rtw of
+        Just tcrtw -> undefined   
+        Nothing -> undefined

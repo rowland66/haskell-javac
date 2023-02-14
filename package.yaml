@@ -39,9 +39,25 @@ dependencies:
 - enumset
 - validation
 
+library:
+  source-dirs: src
+  exposed-modules: 
+  - Compiler
+
 executables:
   hjavac:
     main:                Main.hs
-    source-dirs:         src
-#    ghc-options:
-#    - -prof
+    source-dirs:         driver
+    dependencies:
+    - javac
+
+tests:
+  typechecker:
+    main:               TypeCheckerTests.hs
+    source-dirs:        
+    - src
+    - tests
+    dependencies:
+    - HUnit
+    - test-framework
+    - test-framework-hunit

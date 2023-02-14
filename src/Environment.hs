@@ -16,11 +16,12 @@ import Data.List (foldl,foldl')
 import TypeValidator
 import TypeInfo (Type(..))
 import qualified Data.Vector as V
+import TypeCheckerTypes
 
-data Environment = Environment {variableTypeMap :: Map.Map P.SimpleName Type
+data Environment = Environment { variableTypeMap :: Map.Map P.SimpleName Type
                                , variablePositionMap :: Map.Map P.SimpleName Int
                                , typeData :: ValidTypeClassData
-                               } deriving (Show)
+                               }
 
 createMethodEnvironment :: ValidTypeClassData -> ValidTypeClazz -> ValidTypeMethod -> Environment
 createMethodEnvironment typeData clazz@ValidTypeClazz {..} ValidTypeMethod {..} =
@@ -28,10 +29,9 @@ createMethodEnvironment typeData clazz@ValidTypeClazz {..} ValidTypeMethod {..} 
       env = Map.insert 
         P.createNameThis 
         (L 
-          (LocalCT 
-            (LocalClassType 
-              vcName 
-              (Nothing :: Maybe (V.Vector ClassPathTypeArgument)))))
+          (TypeCheckerClassReferenceTypeWrapper
+            vcName
+            Nothing))
         $ Map.insert P.createNameSuper (L superClass)
         $ foldr (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (L vpType) env) Map.empty vmParams
       (_, envPos') = foldl' (\(i, env) ValidTypeParameter {..} -> (i+1, Map.insert (fst vpName) i env)) (1, Map.empty) vmParams
@@ -51,10 +51,9 @@ createConstructorEnvironmentLeft typeData ValidTypeClazz {..} =
   let env = Map.insert 
               P.createNameThis 
               (L 
-                (LocalCT 
-                  (LocalClassType 
-                    vcName 
-                    (Nothing :: Maybe (V.Vector ClassPathTypeArgument)))))
+                (TypeCheckerClassReferenceTypeWrapper 
+                  vcName
+                  Nothing))
               Map.empty
       envPos = Map.insert P.createNameThis 0 Map.empty in
   Environment {variableTypeMap=env, variablePositionMap=envPos, typeData=typeData}

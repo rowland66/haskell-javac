@@ -24,6 +24,7 @@ import StackMapBuilder
 import TypeCheckerTypes
 import TypeValidator
 import TypeInfo (Type(..))
+import qualified ClassPath as CP
 
 areturn = 0xb0 :: Word8
 putfield = 0xb5 :: Word8
@@ -147,7 +148,7 @@ generateAssignmentCode :: TypedAssignment -> MethodST ([ByteCodeChunk], Word16)
 generateAssignmentCode (NewTypedAssignment lhTerm rhTerm) = generateAssignmentCode' lhTerm rhTerm
 
 generateAssignmentCode' :: TypedTerm -> TypedTerm -> MethodST ([ByteCodeChunk], Word16)
-generateAssignmentCode' (TypedApplication (TypedReferenceTerm typedReferenceTermVtn t) TypedFieldAccess {fName=field, fTyp=tp}) rhTerm= do
+generateAssignmentCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper typedReferenceTermVtn _) t) TypedFieldAccess {fName=field, fTyp=tp}) rhTerm= do
   (lhByteCode, lhMaxStack) <- generateTermCode t
   (rhByteCode, rhMaxStack) <- generateTermCode rhTerm
   fieldRef <- lift $ addFieldRef (getValidTypeQName typedReferenceTermVtn) field tp
@@ -174,14 +175,14 @@ generateTermCode' (TypedValue TypedIntegerLiteral {iValue=value}) = do
                    word8 0x13 <> word16BE intNdx <>  -- ldc_w Integer Constant
                    word8 0xb8 <> word16BE methodRef) -- invokestatic MethodRef
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeClassTypeInteger : stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=L CP.createValidTypeClassTypeInteger : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedStringLiteral {sValue=value}) = do
   strNdx <- lift $ addString value
   let byteCode = toLazyByteString (
                    word8 0x13 <> word16BE strNdx) -- ldc_w String Constant
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeClassTypeString : stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=L CP.createValidTypeClassTypeString : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
   methodRef <- lift $ addMethodRef' P.createQNameBoolean (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)"
@@ -189,9 +190,9 @@ generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
                    (if value then word8 0x04 else word8 0x03) <> -- iconst_1 (true) or iconst_0 (false) 
                    word8 0xb8 <> word16BE methodRef)                           -- invokestatic MethodRef
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=L createValidTypeClassTypeBoolean : stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=L CP.createValidTypeClassTypeBoolean : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
-generateTermCode' (TypedValue TypedObjectCreation {ocTyp=vtn@tpVtn, ocParamTyps=targetParamTypes, ocTerms=terms}) = do
+generateTermCode' (TypedValue TypedObjectCreation {ocTyp=vtn@(TypeCheckerClassReferenceTypeWrapper tpVtn _), ocParamTyps=targetParamTypes, ocTerms=terms}) = do
   pendingStackMapFrame <- getPossiblePendingStackFrame
   classNdx <- lift $ addClass (getValidTypeQName tpVtn)
   (constructorTerms, maxStack) <- generateTermListCode (zip targetParamTypes terms)
@@ -203,20 +204,20 @@ generateTermCode' (TypedValue TypedObjectCreation {ocTyp=vtn@tpVtn, ocParamTyps=
                  [ConstantByteCodeChunk (toLazyByteString (word8 0xbb <> word16BE classNdx <> word8 0x59)) pendingStackMapFrame]
   modify (\MethodState {..} -> MethodState {stackTypes=L vtn : stackTypes,..})
   return (byteCode, maxStack+2) {--Add 2 for the new object ref and the duplicate -}
-generateTermCode' (TypedCast (TypedReferenceTerm tpVtn term)) = do
+generateTermCode' (TypedCast (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper tpVtn _) term)) = do
   classNdx <- lift $ addClass (getValidTypeQName tpVtn)
   (castTermByteCode, maxStack) <- generateTermCode' term
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = ConstantByteCodeChunk (toLazyByteString (word8 0xc0 <> word16BE classNdx)) pendingStackMapFrame:castTermByteCode
   return (byteCode, maxStack)
-generateTermCode' (TypedApplication (TypedReferenceTerm termTypeVtn term) TypedFieldAccess {fName=name, fTyp=tp}) = do
+generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn _) term) TypedFieldAccess {fName=name, fTyp=tp}) = do
   (applicationTermByteCode, maxStack) <- generateTermCode' term
   fieldRef <- lift $ addFieldRef (getValidTypeQName termTypeVtn) name tp
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = ConstantByteCodeChunk (toLazyByteString (word8 0xb4 <> word16BE fieldRef)) pendingStackMapFrame:applicationTermByteCode
   modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..})
   return (byteCode, maxStack)
-generateTermCode' (TypedApplication (TypedReferenceTerm termTypeVtn term) TypedMethodInvocation {..}) = do
+generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn _) term) TypedMethodInvocation {..}) = do
   (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
   (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip mParamTyps mTerms)
   methodRef <- lift $ addMethodRef (getValidTypeQName termTypeVtn) mName mParamTyps (show mTyp)
@@ -226,7 +227,7 @@ generateTermCode' (TypedApplication (TypedReferenceTerm termTypeVtn term) TypedM
                  methodInvocationTermByteCode
   modify (\MethodState {..} -> MethodState {stackTypes=mTyp:drop (length mParamTyps+1) stackTypes,..})
   return (byteCode, max termMaxStack (argumentListMaxStack+1))
-generateTermCode' (TypedApplication (TypedReferenceTerm termTypeVtn term) TypedSuperMethodInvocation {..}) = do
+generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn _) term) TypedSuperMethodInvocation {..}) = do
   (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
   (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip smParamTyps smTerms)
   methodRef <- lift $ addMethodRef (getValidTypeQName termTypeVtn) smName smParamTyps (show smTyp)
@@ -299,12 +300,12 @@ generateTermConversionByteCode :: TypedTerm -> Type -> MethodST [ByteCodeChunk]
 generateTermConversionByteCode typedTerm tp =
   case getTypedTermType typedTerm of
     I -> case tp of
-      (L vtn) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode (getValidTypeQName vtn)
+      (L (TypeCheckerClassReferenceTypeWrapper vtn _)) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode (getValidTypeQName vtn)
       _      -> return [ConstantByteCodeChunk B.empty Nothing]
     Z -> case tp of
-      (L vtn) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode (getValidTypeQName vtn)
+      (L (TypeCheckerClassReferenceTypeWrapper vtn _)) -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermBoxingByteCode (getValidTypeQName vtn)
       _      -> return [ConstantByteCodeChunk B.empty Nothing]
-    L vtn -> case tp of
+    L (TypeCheckerClassReferenceTypeWrapper vtn _) -> case tp of
       I -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermUnboxingByteCode (getValidTypeQName vtn)
       Z -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); generateTermUnboxingByteCode (getValidTypeQName vtn)
       _ -> do modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..}); return [ConstantByteCodeChunk B.empty Nothing]

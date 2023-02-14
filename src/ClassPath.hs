@@ -14,27 +14,25 @@
 -}
 module ClassPath
 ( ClassPath
-, ClassPathValidTypeName -- No constructors exported for this type by design
+{--, ClassPathValidTypeName -- No constructors exported for this type by design-}
 , ClassPathType
-, ClassPathClassReferenceType(..)
 , ClassDescriptor(..)
 , Field(..)
 , Method(..)
 , ClassPathTypeParameter(..)
+, ClassPathTypeBound(..)
 , ClassPathReferenceType(..)
-, ClassPathTypeArgument
 , createClassPath
 , getClassPathValidType
 , getClassPathClassType
 , hasClass
 , isClassPathTypeBoolean
 , isClassPathTypeInteger
-, isClassPathTypeReference
 , getClassPathTypeReference
+, getClassPathTypeVariable
 , getPackageClasses
 , mapMethodToParamTypeList
 , mapMethodToResultType
-, main
 , cInterfaceMaskedValue
 , cAbstractMaskedValue
 , fStaticMaskedValue
@@ -44,6 +42,7 @@ module ClassPath
 , mBridgeMaskedValue
 , eraseRefType
 , eraseParameterizedType
+, createValidTypeNameObject
 , createValidTypeRefTypeObject
 , createValidTypeClassTypeObject
 , createValidTypeNameInteger
@@ -55,6 +54,7 @@ module ClassPath
 , createValidTypeNameString
 , createValidTypeRefTypeString
 , createValidTypeClassTypeString
+, objectTypeParameterBound
 ) where
 
 import qualified Data.Map.Strict as Map
@@ -91,14 +91,20 @@ import qualified Data.IntMap.Strict as List
 
 type ClassReferenceMap = Map.Map T.Text ClassReference
 
+classPathValidTypeName :: QualifiedName -> TypeCheckerValidTypeQualifiedNameWrapper
+classPathValidTypeName qn = TypeCheckerValidTypeQualifiedNameWrapper { getValidTypeQName = qn
+                                                                     , isValidTypeQNameInClasspath = True
+                                                                     }
+
+{--
 newtype ClassPathValidTypeName = ClassPathVTN QualifiedName deriving (Eq,Ord)
 
 instance Show ClassPathValidTypeName where
   show (ClassPathVTN qn) = show qn
 
-instance IValidTypeName ClassPathValidTypeName where
+instance TypeCheckerValidTypeQualifiedName ClassPathValidTypeName where
   getValidTypeQName (ClassPathVTN qn) = qn
-  {--
+  isValidTypeQNameInClasspath _ = True
   getValidTypeArguments (ClassPathVTN _ args) = fmap newValidTypeTypeArgument (V.toList args)
     where
       newValidTypeTypeArgument :: ClassPathTypeArgument -> ValidTypeTypeArgument
@@ -116,76 +122,53 @@ instance IValidTypeName ClassPathValidTypeName where
 data ClassPathTypeParameter = CPTypeParameter SimpleName !(Maybe ClassPathTypeBound) -- parameter name, type it extends and any interface types it implements
                             deriving (Eq)
 
-data ClassPathTypeBound = CPClassTypeTypeBound !ClassPathClassReferenceType !(S.Set ClassPathClassReferenceType)
+data ClassPathTypeBound = CPClassTypeTypeBound !TypeCheckerClassReferenceTypeWrapper !(S.Set TypeCheckerClassReferenceTypeWrapper)
                         | CPTypeVariableTypeBound !SimpleName
                         deriving (Eq)
 
-data ClassPathTypeArgument = CPTypeArgument !(Maybe ValidTypeWildcardIndicator) !ClassPathReferenceType
-                  deriving (Eq)
-
-instance Show ClassPathTypeArgument where
-    show (CPTypeArgument Nothing refType) = show refType
-    show (CPTypeArgument (Just ValidTypeWildcardIndicatorExtends) refType) = "? extends " ++ show refType
-    show (CPTypeArgument (Just ValidTypeWildcardIndicatorSuper) refType) = "? super " ++ show refType
-
-instance IValidTypeTypeArgument ClassPathTypeArgument where
-  isExtends (CPTypeArgument Nothing _ ) = False
-  isExtends (CPTypeArgument (Just ValidTypeWildcardIndicatorExtends) _) = True
-  isExtends (CPTypeArgument (Just _) _) = False 
-  isSuper (CPTypeArgument Nothing _ ) = False
-  isSuper (CPTypeArgument (Just ValidTypeWildcardIndicatorSuper) _) = True
-  isSuper (CPTypeArgument (Just _) _) = False 
-  getTypeArgumentType (CPTypeArgument _ (CPClassRefType vtn maybeTypeArgs)) = IValidTypeReferenceTypeWrapper (CPClassReferenceType vtn maybeTypeArgs)
-  getTypeArgumentType (CPTypeArgument _ _) = undefined
-
-
-data ClassPathReferenceType = CPClassRefType !ClassPathValidTypeName !(Maybe (Vector ClassPathTypeArgument))
+data ClassPathReferenceType = CPClassRefType !TypeCheckerValidTypeQualifiedNameWrapper !(Maybe (Vector TypeCheckerTypeArgument))
                             | CPTypeVariableRefType !SimpleName
-                            | CPArrayRefType !JavaTypeSignature
+                            | CPArrayRefType !ClassPathReferenceType
                             deriving (Eq)
 
-instance IValidTypeReferenceType ClassPathClassReferenceType where
-  getValidTypeRefTypeTypeName (CPClassReferenceType cpvtn _) = getValidTypeQName cpvtn
-
 instance Show ClassPathReferenceType where
-  show (CPClassRefType cpvtn maybeTypeArgs) = show (CPClassReferenceType cpvtn maybeTypeArgs)
+  show (CPClassRefType cpvtn maybeTypeArgs) = show (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)
   show (CPTypeVariableRefType sn) = "T"++show sn++";"
-  show (CPArrayRefType cpt) = show cpt
+  show (CPArrayRefType cpt) = "[" ++ show cpt
 
 instance Ord ClassPathReferenceType where
   compare rt1 rt2 = compare (show rt1) (show rt2)
+
+instance TypeCheckerReferenceType ClassPathReferenceType where
+  getTypeCheckerReferenceTypeClass (CPClassRefType vtn maybeTypeArgs ) = 
+    Just $ TypeCheckerClassReferenceTypeWrapper vtn maybeTypeArgs
+  getTypeCheckerReferenceTypeClass _ = Nothing 
+  getTypeCheckerReferenceTypeTypeVariable (CPTypeVariableRefType sn) =
+    Just sn
+  getTypeCheckerReferenceTypeTypeVariable _ = Nothing  
+  getTypeCheckerReferenceTypeArray (CPArrayRefType cprt) =
+    Just $ TypeCheckerReferenceTypeWrapper cprt
+  getTypeCheckerReferenceTypeArray _ = Nothing
 
 data JavaTypeSignature = PrimitiveJavaTypeSignature !ClassPathType
                        | ReferenceJavaTypeSignature !ClassPathReferenceType
                        deriving (Show,Eq)
 
-data ClassPathClassReferenceType = CPClassReferenceType !ClassPathValidTypeName !(Maybe (Vector ClassPathTypeArgument)) deriving (Eq)
-
-instance Show ClassPathClassReferenceType where
-  show (CPClassReferenceType qn (Just typeArgs)) =
-    "L"++show qn++(if V.null typeArgs then "" else "<"++intercalate "," (V.toList (V.map show typeArgs))++">")++";"
-  show (CPClassReferenceType qn Nothing) =
-    "L"++show qn++";"
-
-{-- Order ClassTypes using the type name and ignoring the arguments. -}
-instance Ord ClassPathClassReferenceType where
-  compare (CPClassReferenceType ct1 _) (CPClassReferenceType ct2 _) = compare ct1 ct2
-
 type PackageMap = Map.Map T.Text ClassReferenceMap -- Mapping from qualified name to the class bytes reference
 
-data ClassPath = ClassPath { directories :: [T.Text]
-                           , jars :: [T.Text]
-                           , referenceMap :: PackageMap
-                           , classMap :: Map.Map T.Text ClassDescriptor
-                           } deriving Show
+data ClassPath = ClassPath { directories :: ![T.Text]
+                           , jars :: ![T.Text]
+                           , referenceMap :: !PackageMap
+                           , classMap :: !(Map.Map T.Text ClassDescriptor)
+                           }
 
 data ClassReference = DirectoryReference T.Text | JarReference T.Text deriving (Show)
 
-data ClassDescriptor = ClassDescriptor { name :: !ClassPathValidTypeName
-                                       , parent :: !ClassPathClassReferenceType
+data ClassDescriptor = ClassDescriptor { name :: !TypeCheckerValidTypeQualifiedNameWrapper
+                                       , parent :: !TypeCheckerClassReferenceTypeWrapper
                                        , accessFlags :: FS.T Word16 ClassAccessFlag
                                        , typeParameters :: !(Vector ClassPathTypeParameter)
-                                       , interfaceClasses :: !(S.Set ClassPathClassReferenceType)
+                                       , interfaceClasses :: !(S.Set TypeCheckerClassReferenceTypeWrapper)
                                        , fields :: ![Field]
                                        , methods :: ![Method]
                                        }
@@ -294,31 +277,29 @@ data Attribute_info = Attribute_info { attribute_name_index :: Int
                                      , attribute_bytes :: B.ByteString
                                      } deriving (Show)
 
-createValidTypeNameObject = ClassPathVTN createQNameObject
+createValidTypeNameObject = classPathValidTypeName createQNameObject
 
 createValidTypeRefTypeObject =  CPClassRefType createValidTypeNameObject Nothing
 
-createValidTypeClassTypeObject =  CPClassReferenceType createValidTypeNameObject Nothing
+createValidTypeClassTypeObject = TypeCheckerClassReferenceTypeWrapper createValidTypeNameObject Nothing
 
-createValidTypeNameInteger = ClassPathVTN createQNameInteger
+createValidTypeNameInteger = classPathValidTypeName createQNameInteger
 
 createValidTypeRefTypeInteger = CPClassRefType createValidTypeNameInteger Nothing
 
-createValidTypeClassTypeInteger = CPClassReferenceType createValidTypeNameInteger Nothing
+createValidTypeClassTypeInteger = TypeCheckerClassReferenceTypeWrapper createValidTypeNameInteger Nothing
 
-createValidTypeNameBoolean = ClassPathVTN createQNameBoolean
+createValidTypeNameBoolean = classPathValidTypeName createQNameBoolean
 
 createValidTypeRefTypeBoolean = CPClassRefType createValidTypeNameBoolean Nothing
 
-createValidTypeClassTypeBoolean = CPClassReferenceType createValidTypeNameBoolean Nothing
+createValidTypeClassTypeBoolean = TypeCheckerClassReferenceTypeWrapper createValidTypeNameBoolean Nothing
 
-createValidTypeNameString = ClassPathVTN createQNameString
+createValidTypeNameString = classPathValidTypeName createQNameString
 
 createValidTypeRefTypeString = CPClassRefType createValidTypeNameString Nothing
 
-createValidTypeClassTypeString = CPClassReferenceType createValidTypeNameString Nothing
-
-newtype ClassPathErasedType = ClassPathErasedType ClassPathType
+createValidTypeClassTypeString = TypeCheckerClassReferenceTypeWrapper createValidTypeNameString Nothing
 
 data ClassPathType =
             I
@@ -331,7 +312,7 @@ data ClassPathType =
           | J
           | S
           | A !ClassPathType
-          | L !ClassPathClassReferenceType
+          | L !TypeCheckerClassReferenceTypeWrapper
           | T !SimpleName
 
 instance Show ClassPathType where
@@ -377,8 +358,8 @@ readType t | T.head t == 'F' = F
 readType t | T.head t == 'J' = J
 readType t | T.head t == 'S' = S
 readType t | T.head t == '[' = A (readType (T.tail t))
-readType t | T.head t == 'L' = L (CPClassReferenceType (ClassPathVTN (constructQualifiedName $ T.drop 1 (T.dropEnd 1 t))) Nothing)
-readType t = undefined
+readType t | T.head t == 'L' = L (TypeCheckerClassReferenceTypeWrapper (classPathValidTypeName (constructQualifiedName $ T.drop 1 (T.dropEnd 1 t))) Nothing)
+readType t = error ("Unkown type prefix: " ++ T.unpack t)
 
 mapJavaTypeSignatureToClassPathType :: JavaTypeSignature -> ClassPathType
 mapJavaTypeSignatureToClassPathType (PrimitiveJavaTypeSignature cpt) = cpt
@@ -387,15 +368,14 @@ mapJavaTypeSignatureToClassPathType (ReferenceJavaTypeSignature rts) = mapClassP
 mapClassPathReferenceTypeToClassPathType :: ClassPathReferenceType -> ClassPathType
 mapClassPathReferenceTypeToClassPathType rts =
   case rts of
-    (CPClassRefType cpvtn maybeTypeArgs) -> L (CPClassReferenceType cpvtn maybeTypeArgs)
+    (CPClassRefType cpvtn maybeTypeArgs) -> L (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)
     CPTypeVariableRefType sn -> T sn
-    CPArrayRefType jts -> mapJTS jts
+    CPArrayRefType cprt -> mapCPRT cprt
     where
-      mapJTS jts = case jts of
-        (PrimitiveJavaTypeSignature cpt) -> A cpt
-        (ReferenceJavaTypeSignature cprt@(CPClassRefType _ _)) -> A (mapClassPathReferenceTypeToClassPathType cprt)
-        (ReferenceJavaTypeSignature cprt@(CPTypeVariableRefType _)) -> A (mapClassPathReferenceTypeToClassPathType cprt)
-        (ReferenceJavaTypeSignature (CPArrayRefType jts)) -> A (mapJTS jts)
+      mapCPRT cprt' = case cprt' of
+        cprt@(CPClassRefType _ _) -> A (mapClassPathReferenceTypeToClassPathType cprt)
+        cprt@(CPTypeVariableRefType _) -> A (mapClassPathReferenceTypeToClassPathType cprt)
+        (CPArrayRefType cprt'') -> A (mapCPRT cprt'')
 
 mapMethodToParamTypeList :: Method -> [ClassPathType]
 mapMethodToParamTypeList Method {..} =
@@ -408,25 +388,25 @@ mapMethodToParamTypeList Method {..} =
     fmap mapJavaTypeSignatureToClassPathType paramTypes
 
 eraseRefType :: [ClassPathTypeParameter] -> ClassPathType -> ClassPathType
-eraseRefType _ (L (CPClassReferenceType cpvtn maybeTypeArgs)) = 
-  L (eraseParameterizedType (CPClassReferenceType cpvtn maybeTypeArgs))
+eraseRefType _ (L (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)) =
+  L (eraseParameterizedType (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs))
 eraseRefType typeParams (T sn) = L (eraseTypeVariable sn typeParams)
 eraseRefType typeParams (A cpt) = eraseRefType typeParams cpt
 eraseRefType _ cpt = cpt
 
-eraseTypeVariable :: SimpleName -> [ClassPathTypeParameter] -> ClassPathClassReferenceType
+eraseTypeVariable :: SimpleName -> [ClassPathTypeParameter] -> TypeCheckerClassReferenceTypeWrapper
 eraseTypeVariable tv typeParams =
   let maybeTypeVariableTypeParam = find (\(CPTypeParameter sn _) -> sn == tv) typeParams
   in
     case maybeTypeVariableTypeParam of
       Nothing -> undefined
-      Just (CPTypeParameter _ Nothing) -> CPClassReferenceType (ClassPathVTN createQNameObject)  Nothing
+      Just (CPTypeParameter _ Nothing) -> TypeCheckerClassReferenceTypeWrapper (classPathValidTypeName createQNameObject)  Nothing
       Just (CPTypeParameter _ (Just (CPClassTypeTypeBound leftMostType _))) -> case leftMostType of
-        CPClassReferenceType (ClassPathVTN qn) _ -> CPClassReferenceType (ClassPathVTN qn) Nothing
+        TypeCheckerClassReferenceTypeWrapper vtqnw _ -> TypeCheckerClassReferenceTypeWrapper vtqnw Nothing
       Just (CPTypeParameter _ (Just (CPTypeVariableTypeBound sn))) -> eraseTypeVariable sn typeParams
 
-eraseParameterizedType :: ClassPathClassReferenceType -> ClassPathClassReferenceType
-eraseParameterizedType (CPClassReferenceType validQn _) = CPClassReferenceType validQn Nothing
+eraseParameterizedType :: TypeCheckerClassReferenceTypeWrapper -> TypeCheckerClassReferenceTypeWrapper
+eraseParameterizedType (TypeCheckerClassReferenceTypeWrapper validQn _) = TypeCheckerClassReferenceTypeWrapper validQn Nothing
 
 {-- Get an ordered list of type parameters in the field context. Filed context includes
     class type parameters only. 
@@ -495,15 +475,15 @@ parseArray = do
   return $ A t
 
 parseReferenceTypeSignature =
-  fmap (\(CPClassReferenceType vtn typeArgs) -> CPClassRefType vtn typeArgs) parseCPClassRefType 
-    <|> parseCPArrayRefType 
+  fmap (\(TypeCheckerClassReferenceTypeWrapper vtn typeArgs) -> CPClassRefType vtn typeArgs) parseCPClassRefType
+    <|> parseCPArrayRefType
     <|> parseCPTypeVariableRefType
 
 parseReferenceTypeType = L <$> parseCPClassRefType
 
 parseCPArrayRefType = do
   char '['
-  CPArrayRefType <$> ((PrimitiveJavaTypeSignature <$> parsePrimitiveType) <|> (ReferenceJavaTypeSignature <$> parseReferenceTypeSignature))
+  CPArrayRefType <$> parseReferenceTypeSignature
 
 parseCPClassRefType = do
   char 'L'
@@ -515,7 +495,7 @@ parseCPClassRefType = do
       typeArgs <- parseTypeArguments;
       char ';'
       return $ Just typeArgs
-  return (CPClassReferenceType (ClassPathVTN (constructQualifiedName (T.pack s))) maybeTypeArguments)
+  return (TypeCheckerClassReferenceTypeWrapper (classPathValidTypeName (constructQualifiedName (T.pack s))) maybeTypeArguments)
 
 parseCPTypeVariableRefType = do
   char 'T'
@@ -537,19 +517,19 @@ parseRefTypeArgument = do
           '+' -> Just ValidTypeWildcardIndicatorExtends
           '-' -> Just ValidTypeWildcardIndicatorSuper
           _ -> undefined
-  CPTypeArgument maybeWildcard <$> parseReferenceTypeSignature
+  TypeCheckerTypeArgument maybeWildcard . TypeCheckerReferenceTypeWrapper <$> parseReferenceTypeSignature
 
 parseAnyTypeArgument = do
   char '*'
-  return $ CPTypeArgument
+  return $ TypeCheckerTypeArgument
     (Just ValidTypeWildcardIndicatorExtends )
-    (CPClassRefType (ClassPathVTN createQNameObject) Nothing)
+    (TypeCheckerReferenceTypeWrapper (CPClassRefType (classPathValidTypeName createQNameObject) Nothing))
 
 parseClassSignature ::
   Parsec
   String
   ()
-  (Maybe [ClassPathTypeParameter], ClassPathClassReferenceType, [ClassPathClassReferenceType])
+  (Maybe [ClassPathTypeParameter], TypeCheckerClassReferenceTypeWrapper, [TypeCheckerClassReferenceTypeWrapper])
 parseClassSignature = do
   typeParams <- optionMaybe parseTypeParameters
   parentTypeSig <- parseCPClassRefType
@@ -569,16 +549,16 @@ parseTypeParameter = do
   interfaceBounds <- many (char ':' >> parseReferenceTypeSignature)
   let interfaceBounds' = fmap mapInterfaceBoundRefType interfaceBounds
   let bound = case classBound of
-        CPClassRefType cpvtn maybeTypeArgs -> 
-          CPClassTypeTypeBound 
-            (CPClassReferenceType cpvtn maybeTypeArgs) 
+        CPClassRefType cpvtn maybeTypeArgs ->
+          CPClassTypeTypeBound
+            (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)
             (S.fromList interfaceBounds')
         CPTypeVariableRefType sn -> CPTypeVariableTypeBound sn
         CPArrayRefType jts -> undefined
   return $ CPTypeParameter identifier (Just bound)
 
-mapInterfaceBoundRefType :: ClassPathReferenceType -> ClassPathClassReferenceType
-mapInterfaceBoundRefType (CPClassRefType cpvtn maybeTypeArgs) = CPClassReferenceType cpvtn maybeTypeArgs
+mapInterfaceBoundRefType :: ClassPathReferenceType -> TypeCheckerClassReferenceTypeWrapper
+mapInterfaceBoundRefType (CPClassRefType cpvtn maybeTypeArgs) = TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs
 mapInterfaceBoundRefType _ = undefined
 
 parseIdentifier = do
@@ -609,13 +589,13 @@ isClassPathTypeInteger :: ClassPathType -> Bool
 isClassPathTypeInteger I = True
 isClassPathTypeInteger _ = False
 
-isClassPathTypeReference :: ClassPathType -> Bool
-isClassPathTypeReference (L _) = True
-isClassPathTypeReference _ = False
-
-getClassPathTypeReference :: ClassPathType -> Maybe ClassPathClassReferenceType
+getClassPathTypeReference :: ClassPathType -> Maybe TypeCheckerClassReferenceTypeWrapper
 getClassPathTypeReference (L cpcrt) = Just cpcrt
 getClassPathTypeReference _ = Nothing
+
+getClassPathTypeVariable :: ClassPathType -> Maybe SimpleName
+getClassPathTypeVariable (T sn) = Just sn
+getClassPathTypeVariable _ = Nothing
 
 getClassFieldType :: ClassDescriptor -> T.Text -> Maybe ClassPathType
 getClassFieldType ClassDescriptor {..} fieldName =
@@ -927,7 +907,7 @@ createClassDescriptor :: ClassFile -> ClassDescriptor
 createClassDescriptor classFile@ClassFile {..} =
   let classInfo = getClassFromConstantPool classFile this_class
       accessFlags = FS.Cons access_flags
-      name = ClassPathVTN (constructQualifiedName $ getUtf8FromConstantPool classFile (ci_name_index classInfo))
+      name = classPathValidTypeName (constructQualifiedName $ getUtf8FromConstantPool classFile (ci_name_index classInfo))
       maybeClassSignatureText = getSignature classFile attributes_info
       {--!x = trace (show $ runParser parseClassSignature () "" . T.unpack <$> maybeClassSignatureText) 1--}
       maybeClassSignature = E.fromRight undefined . runParser parseClassSignature () "" . T.unpack <$> maybeClassSignatureText
@@ -938,20 +918,23 @@ createClassDescriptor classFile@ClassFile {..} =
       parent = case maybeClassSignature of
         Nothing -> if super_class > 0
                     then
-                      CPClassReferenceType
-                        (ClassPathVTN $
+                      TypeCheckerClassReferenceTypeWrapper
+                        (classPathValidTypeName $
                           constructQualifiedName $
                             getUtf8FromConstantPool classFile (ci_name_index (getClassFromConstantPool classFile super_class)))
                         Nothing
                     else
-                      CPClassReferenceType (ClassPathVTN createQNameObject) Nothing -- Only java/lang/Object should get here 
+                      TypeCheckerClassReferenceTypeWrapper 
+                        (classPathValidTypeName 
+                          createQNameObject) 
+                          Nothing -- Only java/lang/Object should get here 
         Just (_, parentClassReferenceType, _) -> parentClassReferenceType
 
       interfaceClasses = case maybeClassSignature of
         Nothing ->  S.fromList $ fmap (
-                      (\qn -> CPClassReferenceType (ClassPathVTN qn) Nothing) 
-                        . constructQualifiedName 
-                          . getUtf8FromConstantPool classFile 
+                      (\qn -> TypeCheckerClassReferenceTypeWrapper (classPathValidTypeName qn) Nothing)
+                        . constructQualifiedName
+                          . getUtf8FromConstantPool classFile
                             . ci_name_index . getClassFromConstantPool classFile)
                         (V.toList interfaces)
         Just (_, _, interfaceClassReferenceTypeList) -> S.fromList interfaceClassReferenceTypeList
@@ -1008,24 +991,26 @@ getClass qualifiedName = do
               put ClassPath {classMap=Map.insert qualifiedName newClassDescriptor classMap,..}
               return $ Just newClassDescriptor
 
-getClassPathValidType :: ClassPathValidTypeName -> StateT ClassPath IO ClassDescriptor
-getClassPathValidType (ClassPathVTN qn) = do
-  maybeClassDesciptor <- getClass (showt qn)
+getClassPathValidType :: TypeCheckerValidTypeQualifiedNameWrapper -> StateT ClassPath IO ClassDescriptor
+getClassPathValidType vtqnw = do
+  maybeClassDesciptor <- getClass (showt (getValidTypeQName vtqnw))
   case maybeClassDesciptor of
-    Nothing -> error ("Classpath consitency error. Unable to load class: "++show qn)
+    Nothing -> error ("Classpath consitency error. Unable to load class: "++show (getValidTypeQName vtqnw))
     Just cd -> return cd
 
 hasClass :: ClassPath -> QualifiedName -> Bool
 hasClass cp qualifiedName =
   case getClassPathClassType cp qualifiedName of Just _ -> True; Nothing -> False
 
-getClassPathClassType :: ClassPath -> QualifiedName -> Maybe ClassPathClassReferenceType
+getClassPathClassType :: ClassPath -> QualifiedName -> Maybe TypeCheckerValidTypeQualifiedNameWrapper
 getClassPathClassType cp qualifiedName =
   let (package,clazz) = T.breakOnEnd sep (toText (showb qualifiedName))
       maybeSubMap = if T.length package > 0 then referenceMap cp Map.!? package else Nothing
       maybeRef = (Map.!? clazz) =<< maybeSubMap
   in
-    case maybeRef of Just _ -> Just (CPClassReferenceType (ClassPathVTN qualifiedName) Nothing); Nothing -> Nothing
+    case maybeRef of 
+      Just _ -> Just (classPathValidTypeName qualifiedName)
+      Nothing -> Nothing
 
 getPackageClasses :: ClassPath -> [T.Text] -> Maybe [T.Text]
 getPackageClasses cp package =
@@ -1076,10 +1061,5 @@ mapFilePathToQualifiedName fp =
     0 -> error "File violating pattern returned"
     _ -> T.pack (take (last dotIndices) fp)
 
-main :: IO ()
-main = do
-  classPath <- createClassPath "out2:out3/classes"
-  maybecf <- evalStateT (getClass (T.pack "java/util/HashMap")) classPath
-  case maybecf of
-    Just cf -> print cf
-    Nothing -> putStrLn "Error"
+objectTypeParameterBound :: ClassPathTypeBound
+objectTypeParameterBound = CPClassTypeTypeBound (TypeCheckerClassReferenceTypeWrapper createValidTypeNameObject Nothing) S.empty

@@ -26,7 +26,8 @@ data StackMapFrameWithOffset = StackMapFrameWithOffset Int64 StackMapFrame
 
 startingStackFrame :: P.QualifiedName -> [ValidTypeParameter] -> StackMapFrame
 startingStackFrame className params =
-  let paramTypes = fmap (\ValidTypeParameter {..} -> getValidTypeRefTypeTypeName vpType) params
+  let paramTypes = fmap ((\(TypeCheckerClassReferenceTypeWrapper vtqnw _) -> getValidTypeQName vtqnw) 
+                       . (\ValidTypeParameter {..} -> vpType)) params
   in
     StackMapFrame { locals=className:paramTypes, stack=[] }
 
@@ -63,7 +64,7 @@ mapTypeToVariableInfo tp = do
   case tp of
     I -> return integerVariableInfo
     Z -> return integerVariableInfo
-    L vtn -> objectVariableInfo (getValidTypeRefTypeTypeName vtn)
+    L (TypeCheckerClassReferenceTypeWrapper vtn _) -> objectVariableInfo (getValidTypeQName vtn)
     _ -> undefined
 
 integerVariableInfo :: Builder
