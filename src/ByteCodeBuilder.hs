@@ -10,7 +10,7 @@ import Control.Monad.Trans.State
 import Control.Monad (foldM)
 import Data.Int
 import Data.Word
-import Data.List
+import Data.List ( foldl' )
 import qualified Data.Text as T
 
 import ConstantPoolBuilder
@@ -23,7 +23,7 @@ import Control.Monad.Trans.Class (lift)
 import StackMapBuilder
 import TypeCheckerTypes
 import TypeValidator
-import TypeInfo (Type(..))
+import TypeInfo (Type(..),eraseParameterizedType,getErasedType, getClassTypeInfo', getErasedMethodSignature, isTypeParameterized)
 import qualified ClassPath as CP
 
 areturn = 0xb0 :: Word8
@@ -80,27 +80,61 @@ buildFieldInfo :: ValidTypeField -> ConstantPoolST B.ByteString
 buildFieldInfo ValidTypeField {..} = do
   let (name,_) = vfName
   nameNdx <- addUtf8 (show name)
-  descriptorNdx <- addUtf8 (show vfType)
-  return $ toLazyByteString (word16BE 0x0001 <> word16BE nameNdx <> word16BE descriptorNdx <> word16BE 0x0000)
+  descriptorNdx <- addUtf8 (show (eraseParameterizedType vfType))
+  let signature = 
+        if isTypeParameterized (L vfType)
+          then
+            Just (show vfType)
+          else
+            Nothing
+  attributes <- 
+        case signature of
+          Nothing -> return $ word16BE 0x0000
+          Just signature -> do
+            attributeNameNdx <- addUtf8 "Signature"
+            signatureNdx <- addUtf8 signature
+            return $ word16BE 0x0001 <> word16BE attributeNameNdx <> word32BE 0x00000002 <> word16BE signatureNdx
+  return $ toLazyByteString (word16BE 0x0001 <> word16BE nameNdx <> word16BE descriptorNdx <> attributes)
 
 buildMethodInfo :: P.QualifiedName -> TypedMethod -> ConstantPoolST B.ByteString
 buildMethodInfo className method@(NewTypedMethod name params tp maybeMethodImpl) = do
-  let rtrnType = if name == P.createNameInit then "V" else show tp
-  let descriptor = "("++foldr (\ValidTypeParameter {..} d -> show vpType++d) "" params++")"++rtrnType
+  let rtrnType = if name == P.createNameInit then "V" else show (eraseParameterizedType tp)
+  let descriptor = "("++foldr (\ValidTypeParameter {..} d -> show (eraseParameterizedType vpType)++d) "" params++")"++rtrnType
   nameNdx <- addUtf8 (show name)
   descriptorNdx <- addUtf8 descriptor
   let accessFlagsBuilder = case maybeMethodImpl of
         Nothing -> word16BE 0x0401
         Just _ -> word16BE 0x0001
   (codeAttrInfo,methodState) <- runStateT (buildMethodCodeAttrInfo method) (newMethodState className params)
+  let isReturnTypeParameterized = isTypeParameterized (L tp)
+      areParamTypesParameterized = foldl' 
+        (\accum ValidTypeParameter {..} -> if accum then accum else isTypeParameterized (L vpType)) 
+        False 
+        params
+      signature = 
+        if isReturnTypeParameterized || areParamTypesParameterized
+          then
+            Just ("("++foldl' (\str ValidTypeParameter {..} -> str++show (L vpType)) "" params++")"++show (L tp))
+          else
+            Nothing
+  sigAttribute <- 
+        case signature of
+          Nothing -> return $ mempty
+          Just signature -> do
+            attributeNameNdx <- addUtf8 "Signature"
+            signatureNdx <- addUtf8 signature
+            return $ word16BE attributeNameNdx <> word32BE 0x00000002 <> word16BE signatureNdx
+  let attributeCount = (case maybeMethodImpl of Just _ -> 1; Nothing -> 0) +
+                       (case signature of Just _ -> 1; Nothing -> 0)
   return $ toLazyByteString (
     accessFlagsBuilder <>
     word16BE nameNdx <>
     word16BE descriptorNdx <>
-    case maybeMethodImpl of Just _ -> word16BE 0x0001; Nothing -> word16BE 0x0000; <>
-    lazyByteString codeAttrInfo)
+    word16BE attributeCount <>
+    codeAttrInfo <>
+    sigAttribute)
 
-buildMethodCodeAttrInfo :: TypedMethod -> MethodST B.ByteString
+buildMethodCodeAttrInfo :: TypedMethod -> MethodST Builder
 buildMethodCodeAttrInfo (NewTypedMethod _ params returnType (Just (TypedMethodImpl term))) = do
   (byteCodeChunks, maxStack) <- generateTermCode term
   boxCodeByteChunks <- generateTermConversionByteCode term (L returnType)
@@ -125,16 +159,16 @@ buildMethodCodeAttrInfo (NewTypedMethod _ params _ (Just (TypedConstructorImpl (
     (fromIntegral (length params) :: Word16)
     (B.concat (reverse codeBytes))
     stackMapBytes
-buildMethodCodeAttrInfo (NewTypedMethod _ _ _ Nothing) = return B.empty
+buildMethodCodeAttrInfo (NewTypedMethod _ _ _ Nothing) = return mempty
 
-buildCodeAttrInfo :: Word16 -> Word16 -> B.ByteString -> [B.ByteString] -> ConstantPoolST B.ByteString
+buildCodeAttrInfo :: Word16 -> Word16 -> B.ByteString -> [B.ByteString] -> ConstantPoolST Builder
 buildCodeAttrInfo maxStack paramsCount codeBytes stackMapBytesList = do
   nameNdx <- addUtf8 "Code"
   stackMapTableAttribute <- createStackTableAttribute stackMapBytesList
   let codeBytesLength = (fromIntegral (B.length codeBytes) :: Word32)
   let stackMapAttributeLength = (fromIntegral (B.length stackMapTableAttribute) :: Word32)
   let codeAttributeInfoLength =  codeBytesLength + stackMapAttributeLength + 12
-  return $ toLazyByteString (
+  return $ 
     word16BE nameNdx <>
     word32BE codeAttributeInfoLength <>
     word16BE maxStack <>
@@ -142,7 +176,7 @@ buildCodeAttrInfo maxStack paramsCount codeBytes stackMapBytesList = do
     word32BE codeBytesLength <>
     lazyByteString codeBytes <>
     word16BE 0x0000 <> {-- Exception table length -}
-    if null stackMapBytesList then word16BE 0x0000 else word16BE 0x0001 <> lazyByteString stackMapTableAttribute)   {-- Attributes table length -}
+    if null stackMapBytesList then word16BE 0x0000 else word16BE 0x0001 <> lazyByteString stackMapTableAttribute   {-- Attributes table length -}
 
 generateAssignmentCode :: TypedAssignment -> MethodST ([ByteCodeChunk], Word16)
 generateAssignmentCode (NewTypedAssignment lhTerm rhTerm) = generateAssignmentCode' lhTerm rhTerm
@@ -151,7 +185,7 @@ generateAssignmentCode' :: TypedTerm -> TypedTerm -> MethodST ([ByteCodeChunk], 
 generateAssignmentCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper typedReferenceTermVtn _) t) TypedFieldAccess {fName=field, fTyp=tp}) rhTerm= do
   (lhByteCode, lhMaxStack) <- generateTermCode t
   (rhByteCode, rhMaxStack) <- generateTermCode rhTerm
-  fieldRef <- lift $ addFieldRef (getValidTypeQName typedReferenceTermVtn) field tp
+  fieldRef <- lift $ addFieldRef (getValidTypeQName typedReferenceTermVtn) field (getErasedType [] tp)
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 putfield <> word16BE fieldRef)) pendingStackMapFrame]++
                  rhByteCode++
@@ -170,7 +204,7 @@ generateTermCode' (TypedValue TypedVariable {vPosition=p, vTyp=tp}) = do
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedIntegerLiteral {iValue=value}) = do
   intNdx <- lift $ addInteger value
-  methodRef <- lift $ addMethodRef' P.createQNameInteger (P.constructSimpleName (T.pack "valueOf")) "(I)Ljava/lang/Integer;" "java/lang/Integer:valueOf(I)"
+  methodRef <- lift $ addSimpleMethodRef P.createQNameInteger (P.constructSimpleName (T.pack "valueOf")) "(I)Ljava/lang/Integer;" "java/lang/Integer:valueOf(I)"
   let byteCode = toLazyByteString (
                    word8 0x13 <> word16BE intNdx <>  -- ldc_w Integer Constant
                    word8 0xb8 <> word16BE methodRef) -- invokestatic MethodRef
@@ -185,7 +219,7 @@ generateTermCode' (TypedValue TypedStringLiteral {sValue=value}) = do
   modify (\MethodState {..} -> MethodState {stackTypes=L CP.createValidTypeClassTypeString : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
 generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
-  methodRef <- lift $ addMethodRef' P.createQNameBoolean (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)"
+  methodRef <- lift $ addSimpleMethodRef P.createQNameBoolean (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)"
   let byteCode = toLazyByteString (
                    (if value then word8 0x04 else word8 0x03) <> -- iconst_1 (true) or iconst_0 (false) 
                    word8 0xb8 <> word16BE methodRef)                           -- invokestatic MethodRef
@@ -212,25 +246,40 @@ generateTermCode' (TypedCast (TypedReferenceTerm (TypeCheckerClassReferenceTypeW
   return (byteCode, maxStack)
 generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn _) term) TypedFieldAccess {fName=name, fTyp=tp}) = do
   (applicationTermByteCode, maxStack) <- generateTermCode' term
-  fieldRef <- lift $ addFieldRef (getValidTypeQName termTypeVtn) name tp
+  fieldRef <- lift $ addFieldRef (getValidTypeQName termTypeVtn) name (getErasedType [] tp) -- TODO: fix when TypeVariables supported.
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = ConstantByteCodeChunk (toLazyByteString (word8 0xb4 <> word16BE fieldRef)) pendingStackMapFrame:applicationTermByteCode
   modify (\MethodState {..} -> MethodState {stackTypes=tp:drop 1 stackTypes,..})
   return (byteCode, maxStack)
-generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn _) term) TypedMethodInvocation {..}) = do
+generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn typeArgs) term) TypedMethodInvocation {..}) = do
   (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
-  (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip mParamTyps mTerms)
-  methodRef <- lift $ addMethodRef (getValidTypeQName termTypeVtn) mName mParamTyps (show mTyp)
+  (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip mArgumentTyps mArgumentTerms)
+  methodRef <- lift $ addMethodRef (getValidTypeQName termTypeVtn) mName mErasedArgumentTypes (show mErasedType)
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 0xb6 <> word16BE methodRef)) pendingStackMapFrame]++
                  methodInvocationTerms++
                  methodInvocationTermByteCode
-  modify (\MethodState {..} -> MethodState {stackTypes=mTyp:drop (length mParamTyps+1) stackTypes,..})
+  modify (\MethodState {..} -> MethodState {stackTypes=mErasedType:drop (length mArgumentTyps+1) stackTypes,..})
+  return (byteCode, max termMaxStack (argumentListMaxStack+1))
+generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn typeArgs) term) TypedInterfaceMethodInvocation {..}) = do
+  (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
+  (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip iArgumentTyps iArgumentTerms)
+  interfaceMethodRef <- lift $ addInterfaceMethodRef (getValidTypeQName termTypeVtn) iName iErasedArgumentTypes (show iErasedType)
+  pendingStackMapFrame <- getPossiblePendingStackFrame
+  let byteCode = [ConstantByteCodeChunk
+                   (toLazyByteString (word8 0xb9 <> 
+                      word16BE interfaceMethodRef <> 
+                      word8 (fromIntegral (length iArgumentTyps+1) :: Word8) <> 
+                      word8 0))
+                   pendingStackMapFrame]++
+                 methodInvocationTerms++
+                 methodInvocationTermByteCode
+  modify (\MethodState {..} -> MethodState {stackTypes=iErasedType:drop (length iArgumentTyps+1) stackTypes,..})
   return (byteCode, max termMaxStack (argumentListMaxStack+1))
 generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassReferenceTypeWrapper termTypeVtn _) term) TypedSuperMethodInvocation {..}) = do
   (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
   (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip smParamTyps smTerms)
-  methodRef <- lift $ addMethodRef (getValidTypeQName termTypeVtn) smName smParamTyps (show smTyp)
+  methodRef <- lift $ addMethodRef (getValidTypeQName termTypeVtn) smName smParamTyps (show (getErasedType [] smTyp))
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 0xb7 <> word16BE methodRef)) pendingStackMapFrame]++ {-- invokespecial -}
                  methodInvocationTerms++
@@ -315,9 +364,9 @@ generateTermBoxingByteCode :: P.QualifiedName -> MethodST [ByteCodeChunk]
 generateTermBoxingByteCode refType = do
   methodRef <- case refType of
     qn | qn == P.createQNameInteger ->
-      lift $ addMethodRef' P.createQNameInteger (P.constructSimpleName (T.pack "valueOf")) "(I)Ljava/lang/Integer;" "java/lang/Integer:valueOf(I)"
+      lift $ addSimpleMethodRef P.createQNameInteger (P.constructSimpleName (T.pack "valueOf")) "(I)Ljava/lang/Integer;" "java/lang/Integer:valueOf(I)"
     qn | qn == P.createQNameBoolean ->
-      lift $ addMethodRef' P.createQNameBoolean (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)"
+      lift $ addSimpleMethodRef P.createQNameBoolean (P.constructSimpleName (T.pack "valueOf")) "(Z)Ljava/lang/Boolean;" "java/lang/Boolean:valueOf(Z)"
     qn -> trace ("Unexpected boxing term type: "++show qn) undefined
   let byteCode = toLazyByteString (word8 0xb8 <> word16BE methodRef)
   pendingStackMapFrame <- getPossiblePendingStackFrame
@@ -327,9 +376,9 @@ generateTermUnboxingByteCode :: P.QualifiedName -> MethodST [ByteCodeChunk]
 generateTermUnboxingByteCode refType = do
   methodRef <- case refType of
     qn | qn == P.createQNameInteger ->
-      lift $ addMethodRef' P.createQNameInteger (P.constructSimpleName (T.pack "intValue")) "()I" "java/lang/Integer:intValue()"
+      lift $ addSimpleMethodRef P.createQNameInteger (P.constructSimpleName (T.pack "intValue")) "()I" "java/lang/Integer:intValue()"
     qn | qn == P.createQNameBoolean ->
-      lift $ addMethodRef' P.createQNameBoolean (P.constructSimpleName (T.pack "booleanValue")) "()Z" "java/lang/Boolean:booleanValue()"
+      lift $ addSimpleMethodRef P.createQNameBoolean (P.constructSimpleName (T.pack "booleanValue")) "()Z" "java/lang/Boolean:booleanValue()"
     qn -> trace ("Unexpected unboxing term type: "++show qn) undefined
   let byteCode = toLazyByteString (word8 0xb6 <> word16BE methodRef)
   pendingStackMapFrame <- getPossiblePendingStackFrame

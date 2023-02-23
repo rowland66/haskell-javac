@@ -1,16 +1,16 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE StrictData #-}
 
 module TypeCheckerTypes
   ( SimpleName (..)
   , QualifiedName (..)
-{--  , TypeCheckerValidTypeQualifiedName (..) -}
   , TypeCheckerValidTypeQualifiedNameWrapper(..)
   , TypeCheckerClassReferenceTypeWrapper(..)
-  , TypeCheckerReferenceType (..)
-  , TypeCheckerReferenceTypeWrapper (..)
+  , TypeCheckerReferenceTypeWrapper(..)
   , TypeCheckerTypeArgument(..)
-  {--, ValidTypeReferenceType(..) -}
+  , TypeCheckerTypeParameter(..)
+  , TypeCheckerTypeBound(..)
   , ValidTypeWildcardIndicator(..)
   , createQNameObject
   , createQNameInteger
@@ -21,6 +21,7 @@ module TypeCheckerTypes
   , deconstructSimpleName
   , deconstructQualifiedName
   , getTypeCheckerClassReferenceTypeClassName
+  , getTypeCheckReferenceTypeClassReferenceType
   , ClassAccessFlag(..)
   , MethodAccessFlag(..)
   , FieldAccessFlag(..)
@@ -30,13 +31,16 @@ where
 import Data.Int
 import qualified Data.Text as T
 import qualified Data.Vector as V
+import qualified Data.Set as S
 import Data.List (intercalate)
 import Text.Parsec.Pos ( SourcePos )
 import TextShow
 
-data QualifiedName = QualifiedName ![T.Text] !SimpleName deriving (Eq, Ord)
+data QualifiedName = QualifiedName [T.Text] SimpleName deriving (Eq, Ord)
 
-data TypeCheckerClassReferenceTypeWrapper = TypeCheckerClassReferenceTypeWrapper !TypeCheckerValidTypeQualifiedNameWrapper !(Maybe (V.Vector TypeCheckerTypeArgument))
+data TypeCheckerClassReferenceTypeWrapper = TypeCheckerClassReferenceTypeWrapper 
+                                              TypeCheckerValidTypeQualifiedNameWrapper 
+                                              (Maybe (V.Vector TypeCheckerTypeArgument))
 
 instance Show TypeCheckerClassReferenceTypeWrapper where
   show (TypeCheckerClassReferenceTypeWrapper qn (Just typeArgs)) =
@@ -63,34 +67,26 @@ getTypeCheckerClassReferenceTypeClassName ::
   TypeCheckerClassReferenceTypeWrapper -> TypeCheckerValidTypeQualifiedNameWrapper
 getTypeCheckerClassReferenceTypeClassName (TypeCheckerClassReferenceTypeWrapper vtn _) = vtn
 
-class TypeCheckerReferenceType a where
-  getTypeCheckerReferenceTypeClass :: a -> Maybe TypeCheckerClassReferenceTypeWrapper
-  getTypeCheckerReferenceTypeTypeVariable :: a -> Maybe SimpleName
-  getTypeCheckerReferenceTypeArray :: a -> Maybe TypeCheckerReferenceTypeWrapper
+data TypeCheckerReferenceTypeWrapper = TypeCheckerClassRefType 
+                                         TypeCheckerClassReferenceTypeWrapper
+                                     | TypeCheckerTypeVariableRefType SimpleName
+                                     | TypeCheckerArrayRefType TypeCheckerReferenceTypeWrapper
+                                     deriving (Eq)
 
-data TypeCheckerReferenceTypeWrapper = forall a. (Show a, Eq a, TypeCheckerReferenceType a) => TypeCheckerReferenceTypeWrapper a
-
-instance TypeCheckerReferenceType TypeCheckerReferenceTypeWrapper where
-  getTypeCheckerReferenceTypeClass (TypeCheckerReferenceTypeWrapper a)= getTypeCheckerReferenceTypeClass a
-  getTypeCheckerReferenceTypeTypeVariable (TypeCheckerReferenceTypeWrapper a) = getTypeCheckerReferenceTypeTypeVariable a
-  getTypeCheckerReferenceTypeArray (TypeCheckerReferenceTypeWrapper a) = getTypeCheckerReferenceTypeArray a
+getTypeCheckReferenceTypeClassReferenceType :: TypeCheckerReferenceTypeWrapper -> Maybe TypeCheckerClassReferenceTypeWrapper
+getTypeCheckReferenceTypeClassReferenceType (TypeCheckerClassRefType tccrtw) = Just tccrtw
+getTypeCheckReferenceTypeClassReferenceType _ = Nothing
 
 instance Show TypeCheckerReferenceTypeWrapper where
-  show (TypeCheckerReferenceTypeWrapper a) = case getTypeCheckerReferenceTypeClass a of
-    Just crtw -> "*" ++ show crtw
-    Nothing -> "Unsupported TypeCheckerReferenceType"
+  show (TypeCheckerClassRefType tccrtw) = show tccrtw
+  show (TypeCheckerTypeVariableRefType sn) = "T"++show sn++";"
+  show (TypeCheckerArrayRefType cpt) = "[" ++ show cpt
 
-instance Eq TypeCheckerReferenceTypeWrapper where
-  (==) (TypeCheckerReferenceTypeWrapper a) (TypeCheckerReferenceTypeWrapper b) =
-    case getTypeCheckerReferenceTypeClass a of
-      Just aCrtw -> case getTypeCheckerReferenceTypeClass b of
-        Nothing -> False
-        Just bCrtw -> aCrtw == bCrtw
-      Nothing -> False
+instance Ord TypeCheckerReferenceTypeWrapper where
+  compare rt1 rt2 = compare (show rt1) (show rt2)
 
 data TypeCheckerValidTypeQualifiedNameWrapper = TypeCheckerValidTypeQualifiedNameWrapper
   { getValidTypeQName :: QualifiedName
-  , isValidTypeQNameInClasspath :: Bool
   }
 
 instance Show TypeCheckerValidTypeQualifiedNameWrapper where
@@ -102,30 +98,32 @@ instance Eq TypeCheckerValidTypeQualifiedNameWrapper where
 
 instance Ord TypeCheckerValidTypeQualifiedNameWrapper where
   compare a b = compare (getValidTypeQName a) (getValidTypeQName b)
-{--                                       
-class TypeCheckerValidTypeQualifiedName a where
-  getValidTypeQName :: a -> QualifiedName
-  isValidTypeQNameInClasspath :: a -> Bool
-
-data TypeCheckerValidTypeQualifiedNameWrapper = forall a. (Show a, Eq a, TypeCheckerValidTypeQualifiedName a) =>
-  TypeCheckerValidTypeQualifiedNameWrapper a
-
-instance TypeCheckerValidTypeQualifiedName TypeCheckerValidTypeQualifiedNameWrapper where
-  getValidTypeQName (TypeCheckerValidTypeQualifiedNameWrapper a) = getValidTypeQName a
-  isValidTypeQNameInClasspath (TypeCheckerValidTypeQualifiedNameWrapper a) = isValidTypeQNameInClasspath a
-
-instance Show TypeCheckerValidTypeQualifiedNameWrapper where
-  show (TypeCheckerValidTypeQualifiedNameWrapper a) = show (getValidTypeQName a)
-
-instance Eq TypeCheckerValidTypeQualifiedNameWrapper where
-  (==) (TypeCheckerValidTypeQualifiedNameWrapper a) (TypeCheckerValidTypeQualifiedNameWrapper b) = 
-    getValidTypeQName a == getValidTypeQName b
--}
 
 data ValidTypeWildcardIndicator = ValidTypeWildcardIndicatorExtends | ValidTypeWildcardIndicatorSuper deriving (Show, Eq)
 
-data TypeCheckerTypeArgument = TypeCheckerTypeArgument !(Maybe ValidTypeWildcardIndicator) !TypeCheckerReferenceTypeWrapper
-                  deriving (Show, Eq)
+data TypeCheckerTypeArgument = TypeCheckerTypeArgument (Maybe ValidTypeWildcardIndicator) TypeCheckerReferenceTypeWrapper
+                  deriving (Eq)
+
+instance Show TypeCheckerTypeArgument where
+  show (TypeCheckerTypeArgument Nothing rtw) = show rtw
+  show (TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorExtends) rtw) = "? extends "++show rtw
+  show (TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorSuper) rtw) = "? super "++show rtw
+
+data TypeCheckerTypeParameter = TypeCheckerTypeParameter SimpleName !(Maybe TypeCheckerTypeBound) -- parameter name, type it extends and any interface types it implements
+                            deriving (Eq)
+
+data TypeCheckerTypeBound = TypeCheckerClassTypeTypeBound !TypeCheckerClassReferenceTypeWrapper !(S.Set TypeCheckerClassReferenceTypeWrapper)
+                          | TypeCheckerTypeVariableTypeBound !SimpleName
+                        deriving (Eq)
+
+instance Show TypeCheckerTypeParameter where
+  show (TypeCheckerTypeParameter sn maybeTypeCheckerTypeBound) = show sn++ (case maybeTypeCheckerTypeBound of
+     Nothing -> show sn
+     Just tb -> show sn++" extends "++show tb)
+
+instance Show TypeCheckerTypeBound where
+  show (TypeCheckerClassTypeTypeBound classBound interfaceBounds) = show classBound++intercalate " & " (fmap show (S.toList interfaceBounds))
+  show (TypeCheckerTypeVariableTypeBound sn) = show sn
 
 newtype SimpleName = SimpleName T.Text deriving (Eq, Ord)
 

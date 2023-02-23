@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE StrictData #-}
 
 {-- Parse a stream of tokens into a Map of Clazz's. Each Clazz has Fields, Constructors and Methods that contain tokens. -}
 
@@ -44,7 +45,7 @@ import qualified Data.Text as T
 import Data.Maybe ( fromMaybe )
 import Text.Parsec.Prim
 import Text.Parsec.Combinator
-    ( anyToken, eof, manyTill, optionMaybe )
+    ( anyToken, eof, manyTill, optionMaybe, parserTrace )
 import Text.Parsec.Pos
 import Text.Parsec.Error ( ParseError, newErrorMessage, Message (Message) )
 import Lexer
@@ -61,7 +62,7 @@ data Body = NewBody [TokenPos] | EmptyBody deriving Show
 
 data Constructor = NewConstructor SourcePos [TokenPos] Body deriving Show
 
-data Field = NewField [TokenPos] [TokenPos] TokenPos deriving Show -- Type TypeArgs Name
+data Field = NewField [TokenPos] TokenPos deriving Show -- Type with TypeArgs, Name
 
 data Method = NewMethod [MethodAccessFlag] [TokenPos] TokenPos [TokenPos] Body deriving Show
 
@@ -166,7 +167,7 @@ fieldDeclaration = do
   maybeTypeArguments <- optionMaybe typeArgumentList
   name <- satisfySimpleName
   satisfy Semi
-  return $ FieldMember (NewField tp (fromMaybe [] maybeTypeArguments) name)
+  return $ FieldMember (NewField (tp++fromMaybe [] maybeTypeArguments) name)
 
 parameterList :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
 parameterList = do
@@ -175,9 +176,23 @@ parameterList = do
 
 typeArgumentList :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
 typeArgumentList = do
-  satisfy LAngleBracket
-  manyTill anyToken (try (satisfy RAngleBracket))
+  token <- satisfy LAngleBracket
+  typeArgumentList' [token]
 
+typeArgumentList' :: (Stream s Identity TokenPos) => [TokenPos] -> Parsec s u [TokenPos]
+typeArgumentList' existingTokens = do
+  typeArgToks <- manyTill anyToken (lookAhead (try (satisfy RAngleBracket) <|> try (satisfy LAngleBracket)))
+  isTypeArgList <- optionMaybe (lookAhead (satisfy LAngleBracket))
+  case isTypeArgList of
+    Nothing -> do
+      rAngleToken <- satisfy RAngleBracket
+      return (existingTokens++typeArgToks++[rAngleToken])
+    Just _ -> do
+      lAngleToken <- satisfy LAngleBracket
+      subTypeArgToks <- typeArgumentList' (existingTokens++typeArgToks++[lAngleToken])
+      rAngleToken <- satisfy RAngleBracket
+      return (subTypeArgToks++[rAngleToken])
+    
 constructorDeclaration :: (Stream s Identity (Token, SourcePos)) => T.Text -> Parsec s u ClazzMember
 constructorDeclaration className = do
   pos <- token (\(tok, pos) -> show tok) snd (\(tok, pos) -> case tok of (Ide nm) | nm == className -> Just pos; _ -> Nothing)
@@ -188,13 +203,14 @@ methodDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s u ClazzM
 methodDeclaration = do
   abs <- try $ optionMaybe $ satisfyKeyword "abstract"
   tp <- satisfyQualifiedName
+  maybeTypeArguments <- optionMaybe typeArgumentList
   name <- satisfySimpleName
   params <- parameterList
   case abs of
     Just _ -> do
       satisfy Semi;
-      return ((MethodMember . NewMethod [MAbstract] tp name params) EmptyBody)
-    Nothing -> MethodMember . NewMethod [] tp name params <$> methodBody
+      return ((MethodMember . NewMethod [MAbstract] (tp++fromMaybe [] maybeTypeArguments) name params) EmptyBody)
+    Nothing -> MethodMember . NewMethod [] (tp++fromMaybe [] maybeTypeArguments) name params <$> methodBody
 
 methodBody :: (Stream s Identity (Token, SourcePos)) => Parsec s u Body
 methodBody = do
@@ -235,10 +251,10 @@ satisfyAny = token (\(tok, pos) -> show tok)
                   snd
                   (\(tok, pos) -> Just (pos,tok))
 
-satisfy :: (Stream s Identity (Token, SourcePos)) => Token -> Parsec s u SourcePos
+satisfy :: (Stream s Identity (Token, SourcePos)) => Token -> Parsec s u TokenPos
 satisfy t = token (\(tok, pos) -> show tok)
                   snd
-                  (\(tok, pos) -> if tok == t then Just pos else Nothing)
+                  (\(tok, pos) -> if tok == t then Just (t,pos) else Nothing)
 
 satisfyKeyword :: (Stream s Identity (Token, SourcePos)) => String -> Parsec s u SourcePos
 satisfyKeyword k = token (\(tok, pos) -> show tok)
@@ -266,7 +282,7 @@ satisfyQualifiedName' first = do
   case maybeDot of
     Just dotpos -> do
       next <- satisfySimpleName
-      satisfyQualifiedName' (next:((Dot,dotpos):first))
+      satisfyQualifiedName' (next:(dotpos:first))
     Nothing -> return (reverse first)
 
 satisfyPackageOrTypeName :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
@@ -282,10 +298,10 @@ satisfyPackageOrTypeName' first = do
       maybeAsterick <- optionMaybe (satisfy Asterick)
       case maybeAsterick of
         Just asterickPos ->
-          satisfyPackageOrTypeName' ((Asterick,asterickPos):((Dot,dotpos):first))
+          satisfyPackageOrTypeName' (asterickPos:(dotpos:first))
         Nothing -> do
           next <- satisfySimpleName
-          satisfyPackageOrTypeName' (next:((Dot,dotpos):first))
+          satisfyPackageOrTypeName' (next:(dotpos:first))
     Nothing -> return (reverse first)
 
 createName :: TokenPos -> (SimpleName, SourcePos)

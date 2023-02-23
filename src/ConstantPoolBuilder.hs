@@ -7,8 +7,9 @@ module ConstantPoolBuilder
   , addUtf8
   , addClass
   , addFieldRef
+  , addSimpleMethodRef
   , addMethodRef
-  , addMethodRef'
+  , addInterfaceMethodRef
   , addInteger
   , addString
   ) where
@@ -24,7 +25,7 @@ import Debug.Trace
 import qualified Parser as P
 import qualified Parser2 as P2
 import Data.Int (Int32)
-import TypeInfo (Type)
+import TypeInfo (Type, getErasedMethodSignature)
 
 data ConstantPool = ConstantPool { pool :: [B.ByteString]
                                  , size :: Word16
@@ -91,14 +92,23 @@ addFieldRef className name tp = do
       cp {pool=createFieldRefByteString classNdx nameAndTypeNdx:p, size=s+1, fieldRefMap=Map.insert key (s+1) frmap})
     fmap (\ConstantPool{size=s} -> s) get
 
+addSimpleMethodRef :: P.QualifiedName -> P.SimpleName -> String -> String -> ConstantPoolST Word16
+addSimpleMethodRef = addMethodOrInterfaceRef' createMethodRefByteString
+
 addMethodRef :: P.QualifiedName -> P.SimpleName -> [Type] -> String -> ConstantPoolST Word16
-addMethodRef className name params tp = do
+addMethodRef = addMethodOrInterfaceRef createMethodRefByteString
+
+addInterfaceMethodRef :: P.QualifiedName -> P.SimpleName -> [Type] -> String -> ConstantPoolST Word16
+addInterfaceMethodRef = addMethodOrInterfaceRef createInterfaceMethodRefByteString
+
+addMethodOrInterfaceRef :: (Word16 -> Word16 -> B.ByteString) -> P.QualifiedName -> P.SimpleName -> [Type] -> String -> ConstantPoolST Word16
+addMethodOrInterfaceRef methodRefInfoFunction className name params tp = do
   let key = show className++":"++show name++":"++foldr (\p ps -> show p++ps) [] params
   let descriptor = "("++foldr (\p d -> show p++d) "" params++")"++tp
-  addMethodRef' className name descriptor key
+  addMethodOrInterfaceRef' methodRefInfoFunction className name descriptor key
 
-addMethodRef' :: P.QualifiedName -> P.SimpleName -> String -> String -> ConstantPoolST Word16
-addMethodRef' className name descriptor mapKey = do
+addMethodOrInterfaceRef' :: (Word16 -> Word16 -> B.ByteString) -> P.QualifiedName -> P.SimpleName -> String -> String -> ConstantPoolST Word16
+addMethodOrInterfaceRef' methodRefInfoFunction className name descriptor mapKey = do
   ConstantPool{methodRefMap=mrmap} <- get
   if Map.member mapKey mrmap then
     return (mrmap Map.! mapKey)
@@ -106,7 +116,7 @@ addMethodRef' className name descriptor mapKey = do
     classNdx <- addClass className
     nameAndTypeNdx <- addNameAndType (show name) descriptor
     modify (\cp@ConstantPool{pool=p,size=s} ->
-      cp {pool=createMethodRefByteString classNdx nameAndTypeNdx:p, size=s+1, methodRefMap=Map.insert mapKey (s+1) mrmap})
+      cp {pool=methodRefInfoFunction classNdx nameAndTypeNdx:p, size=s+1, methodRefMap=Map.insert mapKey (s+1) mrmap})
     fmap (\ConstantPool{size=s} -> s) get
 
 addNameAndType :: String -> String -> ConstantPoolST Word16
@@ -151,6 +161,9 @@ createFieldRefByteString classNdx natNdx = toLazyByteString (mappend (word8 0x09
 
 createMethodRefByteString :: Word16 -> Word16 -> B.ByteString
 createMethodRefByteString classNdx natNdx = toLazyByteString (mappend (word8 0x0A) (mappend (word16BE classNdx) (word16BE natNdx)))
+
+createInterfaceMethodRefByteString :: Word16 -> Word16 -> B.ByteString
+createInterfaceMethodRefByteString interfaceNdx natNdx = toLazyByteString (mappend (word8 0x0B) (mappend (word16BE interfaceNdx) (word16BE natNdx)))
 
 createNameAndTypeByteString :: Word16 -> Word16 -> B.ByteString
 createNameAndTypeByteString nameNdx typeNdx = toLazyByteString (mappend (word8 0x0C) (mappend (word16BE nameNdx) (word16BE typeNdx)))

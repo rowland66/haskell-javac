@@ -49,7 +49,16 @@ ide = do
         rest      = firstChar ++ ['0'..'9']
 
 decimalNumeral :: Parser TokenPos
-decimalNumeral = do
+decimalNumeral = zeroDigit <|> nonZeroNumber
+
+zeroDigit :: Parser TokenPos
+zeroDigit = do
+  pos <- getPosition
+  oneOf "0"
+  return $ flip (,) pos (IntegerLiteral 0)
+
+nonZeroNumber :: Parser TokenPos
+nonZeroNumber = do
   pos <- getPosition
   fc <- oneOf nonZeroDigit
   r <- optionMaybe (many $ oneOf digit)

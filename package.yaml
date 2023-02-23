@@ -55,8 +55,8 @@ tests:
   typechecker:
     main:               TypeCheckerTests.hs
     source-dirs:        
-    - src
     - tests
+    - src
     dependencies:
     - HUnit
     - test-framework

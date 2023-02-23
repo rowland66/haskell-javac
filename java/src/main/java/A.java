@@ -1,29 +1,30 @@
 package org.rowland;
 
 import java.util.Vector;
+import java.util.List;
+import java.util.LinkedList;
 import java.util.TimeZone;
+import test.FunnyList;
 
 class A extends Object {
-  /**
   String foo;
   String foo2;
   Integer bar;
   Boolean b;
-  */
-  Vector<Integer> v;
+
+  Vector<List<Integer>> v;
+  List<Integer> e;
 
   A() {
     super();
-    /**
     this.foo = "Rowland";
-    this.foo2 = "Smit";
+    this.foo2 = "Smith";
     this.bar = 5;
     this.b = true;
-    */
-    this.v = new Vector<Integer>();
+    this.v = new Vector<List<Integer>>();
+    this.e = new LinkedList<Integer>();
   }
 
-/**
   A(String f) {
     this();
     this.foo = f;
@@ -48,18 +49,23 @@ class A extends Object {
   Integer addInt(Integer a) {
     return featherjava.lang.IntegerMath.add(this.bar, featherjava.lang.IntegerMath.mul(a,2));
   }
-  */
+  
   /**
     Calling method with parameters of different types, and boxing result.
-   */
-  Boolean test(Integer a) {
+  */
+
+  Boolean testPut(List<Integer> a) {
     return this.v.add(a);
   }
-/**
+
+  List<Integer> testGet() {
+    return this.v.get(0);
+  }
+
   Integer compare(String a) {
     return this.foo.compareTo(a);
   }
-
+  
   Integer getCodePoint() {
     return this.foo.codePointAt(Math.min(Math.subtractExact(this.foo2.length(),1),Math.subtractExact(this.foo.length(),1)));
   }
@@ -96,7 +102,7 @@ class A extends Object {
   Integer staticMethodTest() {
     return this.bar.bitCount(this.bar);
   }
-  */
+  
 }
 /**
 class StringReaderTest extends Object {
@@ -112,6 +118,5 @@ class StringReaderTest extends Object {
   java.nio.CharBuffer getBuffer() {
     return java.nio.CharBuffer.allocate(128).append("Good evening sir.");
   }
+*/ 
 
-} 
-*/

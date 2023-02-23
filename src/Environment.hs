@@ -24,7 +24,7 @@ data Environment = Environment { variableTypeMap :: Map.Map P.SimpleName Type
                                }
 
 createMethodEnvironment :: ValidTypeClassData -> ValidTypeClazz -> ValidTypeMethod -> Environment
-createMethodEnvironment typeData clazz@ValidTypeClazz {..} ValidTypeMethod {..} =
+createMethodEnvironment typeData ValidTypeClazz {..} ValidTypeMethod {..} =
   let (superClass, _) = vcParent
       env = Map.insert 
         P.createNameThis 
@@ -32,11 +32,18 @@ createMethodEnvironment typeData clazz@ValidTypeClazz {..} ValidTypeMethod {..} 
           (TypeCheckerClassReferenceTypeWrapper
             vcName
             Nothing))
-        $ Map.insert P.createNameSuper (L superClass)
-        $ foldr (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (L vpType) env) Map.empty vmParams
-      (_, envPos') = foldl' (\(i, env) ValidTypeParameter {..} -> (i+1, Map.insert (fst vpName) i env)) (1, Map.empty) vmParams
-      envPos = Map.insert P.createNameThis 0 envPos' in
-  Environment {variableTypeMap=env, variablePositionMap=envPos, typeData=typeData}
+        (Map.insert P.createNameSuper (L superClass)
+          (foldr 
+            (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (L vpType) env) 
+            Map.empty 
+            vmParams))
+      (_, envPos') = foldl' 
+        (\(i, env) ValidTypeParameter {..} -> (i+1, Map.insert (fst vpName) i env)) 
+        (1, Map.empty) 
+        vmParams
+      envPos = Map.insert P.createNameThis 0 envPos'
+  in
+    Environment {variableTypeMap=env, variablePositionMap=envPos, typeData=typeData}
 
 createConstructorEnvironmentRight :: ValidTypeClassData -> ValidTypeClazz -> ValidTypeMethod -> Environment
 createConstructorEnvironmentRight typeData ValidTypeClazz {..} ValidTypeMethod {..} =

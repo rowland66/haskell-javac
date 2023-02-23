@@ -58,10 +58,6 @@ abstract class AbstractTest {
   Integer getMyNumber() {
     return this.getNumber();
   }
-
-  String toString() {
-    return "TestString";
-  }
 }
 
 class AbstractImpl extends AbstractTest {
