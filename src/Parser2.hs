@@ -21,7 +21,9 @@ module Parser2
   , MethodImplementation(..)
   , Clazz2(..)
   , TypeArgument(..)
+  , PrimitiveType(..)
   , ReferenceType(..)
+  , JavaType(..)
   , TypeError(..) -- defined here to be shared by TypeInfo and TypeChecker
   , LocalClasses
   , getTermPosition
@@ -44,7 +46,7 @@ import qualified Parser as P
 import ClassPath (ClassPath,hasClass)
 import Lexer
     ( TokenPos,
-      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword, IntegerLiteral, StringLiteral, BooleanLiteral, Question, Colon, LAngleBracket, RAngleBracket) )
+      Token(Dot, LParens, Comma, Semi, RParens, Assign, Ide, Keyword, IntegerLiteral, StringLiteral, BooleanLiteral, Question, Colon, LAngleBracket, RAngleBracket, IntegralTypeTok, BooleanTypeTok) )
 import Debug.Trace
 import Control.Monad.Extra (ifM)
 import Parser (NameToPackageMap)
@@ -53,7 +55,7 @@ import Text.ParserCombinators.ReadPrec
 import TypeCheckerTypes
 
 data Abstraction = FieldAccess SourcePos P.SimpleName
-                 | MethodInvocation SourcePos P.SimpleName [Term]
+                 | MethodInvocation SourcePos P.SimpleName [Term] [TypeArgument]
                  | SuperMethodInvocation SourcePos P.SimpleName [Term]
                  deriving Show
 
@@ -86,9 +88,13 @@ data WildcardBounds = ExtendsBounds ReferenceType
                     | SuperBounds ReferenceType
                     deriving Show
 
+data PrimitiveType = PrimitiveIntegralType SourcePos | PrimitiveBooleanType SourcePos deriving Show
+
 data ReferenceType = ClassType SourcePos P.QualifiedName [TypeArgument]
                    | TypeVariable SourcePos P.SimpleName
                    deriving Show
+
+data JavaType = JavaPrimitiveType PrimitiveType | JavaReferenceType ReferenceType deriving Show
 
 instance Show TypeError where
   show (TypeError str pos) = str ++ "\nat: " ++ show pos
@@ -108,7 +114,7 @@ getTermPosition (Conditional t _ _) = getTermPosition t
 
 type LocalClasses = Map.Map P.QualifiedName Clazz2
 
-data Extends = NewExtends SourcePos P.QualifiedName | ExtendsObject
+data Extends = NewExtends SourcePos P.QualifiedName [TypeArgument] | ExtendsObject
 
 data ConstructorInvocation = NewConstructorInvocation SourcePos [Term] deriving Show
 
@@ -116,13 +122,13 @@ data SuperConstructorInvocation = NewSuperConstructorInvocation SourcePos [Term]
 
 data Assignment = NewAssignment SourcePos Term SourcePos Term deriving Show
 
-data Signature = Signature P.SimpleName [ReferenceType]
+data Signature = Signature P.SimpleName [JavaType]
 
-data Parameter = NewParameter ReferenceType SourcePos P.SimpleName deriving Show
+data Parameter = NewParameter JavaType SourcePos P.SimpleName deriving Show
 
-data Field = NewField ReferenceType SourcePos P.SimpleName
+data Field = NewField JavaType SourcePos P.SimpleName
 
-data Method = NewMethod SourcePos [P.MethodAccessFlag] P.SimpleName [Parameter] ReferenceType Signature (Maybe MethodImplementation)
+data Method = NewMethod SourcePos [P.MethodAccessFlag] P.SimpleName [Parameter] JavaType Signature (Maybe MethodImplementation)
 
 data Clazz2 = NewClazz2 SourcePos P.CompilationUnit [P.ClassAccessFlag] P.QualifiedName Extends [Field] [Method]
 
@@ -143,7 +149,8 @@ instance Show Method where
   show (NewMethod _ _ _ _ _ sig Nothing) = show sig
 
 instance Show Extends where
-  show (NewExtends _ qName) = "extends " ++ show qName
+  show (NewExtends _ qName typeArgs) = "extends " ++ show qName ++ 
+    if null typeArgs then "" else "<"++intercalate ", " (fmap show typeArgs)++">"
   show ExtendsObject = "extends /java/lang/Object"
 
 instance Show Clazz2 where
@@ -175,7 +182,7 @@ mapExtends P.CompilationUnit {..} classMap =
 
 mapField :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Field -> Either ParseError Field
 mapField P.CompilationUnit {..} classMap (P.NewField typeToks nmTok) = do
-  fieldType <- runParser parseReferenceType  (TermState {termStack=[],maybeTypeName=Nothing,..}) "" typeToks
+  fieldType <- runParser parseJavaType  (TermState {termStack=[],maybeTypeName=Nothing,..}) "" typeToks
   let (nm,nmpos) = P.createName nmTok
   trace ("field: "++show nm++" = "++show fieldType) return (NewField fieldType nmpos nm)
 
@@ -187,7 +194,7 @@ mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks (P.New
                     []
                     P.createNameInit
                     params
-                    (ClassType pos P.createQNameObject [])
+                    (JavaReferenceType (ClassType pos P.createQNameObject []))
                     (createSignature P.createNameInit params)
                     (Just (ConstructorImpl constructorInv assignments)))
 mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks P.EmptyBody) =
@@ -195,7 +202,7 @@ mapConstructor P.CompilationUnit {..} classMap (P.NewConstructor pos toks P.Empt
 
 mapMethod :: P.CompilationUnit -> Map.Map P.QualifiedName P.Clazz -> P.Method -> Either ParseError Method
 mapMethod P.CompilationUnit {..} classMap (P.NewMethod accessFlags tpTok nmTok paramsToks body) = do
-  tp <- runParser parseReferenceType  (TermState {termStack=[],maybeTypeName=Nothing,..}) "" tpTok
+  tp <- runParser parseJavaType  (TermState {termStack=[],maybeTypeName=Nothing,..}) "" tpTok
   let (nm,pos) = P.createName nmTok
   params <- runParser parameter (TermState {termStack=[],maybeTypeName=Nothing,..}) "" paramsToks
   case body of
@@ -209,8 +216,9 @@ parseExtends :: (Stream s Identity TokenPos) => Parsec s TermState Extends
 parseExtends = do
   TermState {..} <- getState
   toks <- satisfyQualifiedName
+  typeArgs <- parseTypeArguments
   let (qName,pos) = P.createQName package classMap imports toks
-  return (if show qName == "/java/lang/Object" then ExtendsObject else NewExtends pos qName)
+  return (if show qName == "/java/lang/Object" then ExtendsObject else NewExtends pos qName typeArgs)
 
 parseTypeArguments :: (Stream s Identity TokenPos) => Parsec s TermState [TypeArgument]
 parseTypeArguments = do
@@ -221,6 +229,21 @@ parseTypeArguments = do
       typeArgs <- parseReferenceTypes
       P.satisfy RAngleBracket
       return $ fmap ReferenceTypeArgument typeArgs
+
+parseJavaType :: (Stream s Identity TokenPos) => Parsec s TermState JavaType
+parseJavaType = do
+  maybePrimitiveType <- optionMaybe parsePrimitiveType
+  case maybePrimitiveType of
+    Just pt -> return (JavaPrimitiveType pt)
+    Nothing -> JavaReferenceType <$> parseReferenceType
+
+parsePrimitiveType :: (Stream s Identity TokenPos) => Parsec s TermState PrimitiveType
+parsePrimitiveType = do
+  maybePrimitiveType <- try (P.satisfy IntegralTypeTok) <|> (P.satisfy BooleanTypeTok)
+  return $ case maybePrimitiveType of
+    (IntegralTypeTok,pos) -> PrimitiveIntegralType pos
+    (BooleanTypeTok,pos) -> PrimitiveBooleanType pos
+    _ -> undefined
 
 parseReferenceType :: (Stream s Identity TokenPos) => Parsec s TermState ReferenceType
 parseReferenceType = do
@@ -307,7 +330,7 @@ parameter = do
     Just _ -> return []
     Nothing -> do
       TermState {..} <- getState
-      tp <- parseReferenceType
+      tp <- parseJavaType
       tok <- P.satisfySimpleName
       let (name,nmpos) = P.createName tok
       fmap ([NewParameter tp nmpos name] ++) nextParameter
@@ -476,6 +499,7 @@ fieldAccessTerm = do
 methodInvocationTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 methodInvocationTerm = do
   TermState {..} <- getState
+  typeArgs <- parseTypeArguments
   tok <- P.satisfySimpleName
   let (method,pos) = P.createName tok
   P.satisfy LParens
@@ -486,7 +510,7 @@ methodInvocationTerm = do
   case maybeTypeName of
     Just typeName@(ClassType pos _ _) -> do
       putState (TermState {maybeTypeName=Nothing,..})
-      return (Application (ApplicationTargetTypeName typeName) (MethodInvocation pos method arguments))
+      return (Application (ApplicationTargetTypeName typeName) (MethodInvocation pos method arguments typeArgs))
     Just typeVariable@(TypeVariable _ _) -> undefined 
     Nothing -> case termStack of
       [] -> parserFail "Invalid method invocation application"
@@ -494,8 +518,16 @@ methodInvocationTerm = do
         putState (TermState {termStack=ts,..})
         case t of
           Value (Variable pos' nm) | nm == P.createNameSuper ->
-            return (Application (ApplicationTargetTerm (Value (Variable pos' P.createNameThis))) (SuperMethodInvocation pos method arguments))
-          _ -> return (Application (ApplicationTargetTerm t) (MethodInvocation pos method arguments))
+            return 
+              (Application 
+                (ApplicationTargetTerm 
+                  (Value (Variable pos' P.createNameThis)))
+                (SuperMethodInvocation pos method arguments))
+          _ -> 
+            return 
+              (Application 
+                (ApplicationTargetTerm t) 
+                (MethodInvocation pos method arguments typeArgs))
 
 castTerm :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 castTerm = do

@@ -214,6 +214,26 @@ test14 = do
         "java/util/Vector<Number> is a subtype of java/util/AbstractCollection<? super Integer>"
         isSubtype
 
+test15 :: StateT ClassPath IO ()
+test15 = do
+  classpath <- get
+  maybeClassList <- sequence [getClass (T.pack "java/lang/Number"), getClass (T.pack "java/lang/Integer"), getClass (T.pack "java/util/List")]
+  let maybeClassList' = sequence maybeClassList
+  case maybeClassList' of
+    Nothing -> lift (assertFailure "Failed to load class")
+    Just classList -> do
+      let numberVtnw = (head classList)
+          integerVtnw = (head (tail classList))
+          listVtnw = (head (tail (tail classList)))
+          classRefTypeNumber = TypeCheckerClassRefType (TypeCheckerClassReferenceTypeWrapper numberVtnw Nothing)
+          classRefTypeInteger = TypeCheckerClassRefType (TypeCheckerClassReferenceTypeWrapper integerVtnw Nothing)
+      isSubtype <- subtypeTestWithTypeParams 
+        "java/util/List" [TypeCheckerTypeArgument Nothing classRefTypeNumber] 
+        "java/util/List" [TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorSuper) classRefTypeInteger]
+      lift $ assertBool
+        "java/util/Vector<Number> is a subtype of java/util/AbstractCollection<? super Integer>"
+        isSubtype
+
 main :: IO ()
 main = do
   classPath <- createClassPath "out3/classes"

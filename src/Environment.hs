@@ -14,7 +14,7 @@ import ClassPath
 import qualified Parser as P
 import Data.List (foldl,foldl')
 import TypeValidator
-import TypeInfo (Type(..))
+import TypeInfo (Type(..), convertTypeCheckerJavaType)
 import qualified Data.Vector as V
 import TypeCheckerTypes
 
@@ -34,7 +34,7 @@ createMethodEnvironment typeData ValidTypeClazz {..} ValidTypeMethod {..} =
             Nothing))
         (Map.insert P.createNameSuper (L superClass)
           (foldr 
-            (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (L vpType) env) 
+            (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (convertTypeCheckerJavaType vpType) env) 
             Map.empty 
             vmParams))
       (_, envPos') = foldl' 
@@ -47,7 +47,7 @@ createMethodEnvironment typeData ValidTypeClazz {..} ValidTypeMethod {..} =
 
 createConstructorEnvironmentRight :: ValidTypeClassData -> ValidTypeClazz -> ValidTypeMethod -> Environment
 createConstructorEnvironmentRight typeData ValidTypeClazz {..} ValidTypeMethod {..} =
-  let env = foldr (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (L vpType) env) Map.empty vmParams
+  let env = foldr (\ValidTypeParameter {..} env -> Map.insert (fst vpName) (convertTypeCheckerJavaType vpType) env) Map.empty vmParams
       (_, envPos') = foldl (\(i, env) ValidTypeParameter {..} -> (i+1, Map.insert (fst vpName) i env)) (1, Map.empty) vmParams
       envPos = Map.insert P.createNameThis 0 envPos' in
   Environment {variableTypeMap=env, variablePositionMap=envPos, typeData=typeData}

@@ -29,6 +29,7 @@ module TypeValidator (
 , ValidTypeParameter(..)
 , ValidTypeClazz(..)
 , ValidTypeClassData
+, ValidTypeTypeName(..)
 , transformToValidTypes
 , TypeInfoData(..)
 ) where
@@ -44,6 +45,7 @@ import qualified Data.Vector as Vector
 import TextShow (showb,toText)
 import qualified Data.Vector as V
 import qualified Data.List as L
+import Control.Conditional (if')
 import Debug.Trace
 
 import TypeCheckerTypes
@@ -67,7 +69,7 @@ typeValidatorValidTypeName qn = TypeCheckerValidTypeQualifiedNameWrapper { getVa
                                                                          }
 
 data ValidTypeAbstraction = ValidTypeFieldAccess SourcePos SimpleName
-                          | ValidTypeMethodInvocation SourcePos SimpleName [ValidTypeTerm]
+                          | ValidTypeMethodInvocation SourcePos SimpleName [ValidTypeTerm] [TypeCheckerTypeArgument]
                           | ValidTypeSuperMethodInvocation SourcePos SimpleName [ValidTypeTerm]
                           deriving Show
 
@@ -79,7 +81,7 @@ data ValidTypeValue = ValidTypeVariable SourcePos SimpleName
                     deriving Show
 
 data ValidTypeApplicationTarget = ValidTypeApplicationTargetTerm ValidTypeTerm
-                                | ValidTypeApplicationTargetTypeName ValidTypeRefTypeDeclaration
+                                | ValidTypeApplicationTargetTypeName ValidTypeTypeName
                                 deriving Show
 
 data ValidTypeTerm = ValidTypeValue ValidTypeValue
@@ -90,7 +92,7 @@ data ValidTypeTerm = ValidTypeValue ValidTypeValue
 
 
 data ValidTypeParameter = ValidTypeParameter { vpName :: (SimpleName, SourcePos)
-                                             , vpType :: TypeCheckerClassReferenceTypeWrapper
+                                             , vpType :: TypeCheckerJavaType
                                              } deriving (Show,Eq)
 
 data ValidTypeConstructorInvocation = ValidTypeConstructorInvocation SourcePos [ValidTypeTerm] deriving Show
@@ -109,13 +111,13 @@ data ValidTypeMethodImplementation = ValidTypeMethodImplementation { vmiTerm :: 
 mkValidTypeConstructorImplementation :: ValidTypeConstructorInvocation -> [ValidTypeAssignment] -> ValidTypeMethodImplementation
 mkValidTypeConstructorImplementation constructorInvocation vmiAssignments =
   let vmiConstructorInvocation = Left constructorInvocation
-  in 
+  in
     ValidTypeConstructorImplementation{..}
 
 mkValidTypeSuperConstructorImplementation :: ValidTypeSuperConstructorInvocation -> [ValidTypeAssignment] -> ValidTypeMethodImplementation
 mkValidTypeSuperConstructorImplementation constructorInvocation vmiAssignments =
   let vmiConstructorInvocation = Right constructorInvocation
-  in 
+  in
     ValidTypeConstructorImplementation{..}
 
 vectorToString :: Show a => Vector.Vector a -> String
@@ -127,40 +129,18 @@ vectorToString = Vector.foldr join ""
                                     else "," ++ s
 
 
-data ValidTypeRefTypeDeclaration = ValidTypeRefTypeDeclaration SourcePos TypeCheckerClassReferenceTypeWrapper deriving Show
+data ValidTypeRefTypeDeclaration = ValidTypeRefTypeDeclaration SourcePos TypeCheckerReferenceTypeWrapper deriving Show
 
-{--
-data ValidTypeClassType = LocalCT LocalClassReferenceType | ClassPathCT ClassPathClassReferenceType deriving (Show)
-
-instance Eq ValidTypeClassType where
-  (==) (LocalCT (LocalClassReferenceType sn1 _)) (LocalCT (LocalClassReferenceType sn2 _)) = sn1 == sn2
-  (==) (LocalCT (LocalClassReferenceType sn1 _)) (ClassPathCT cpcrt) =
-    let (CPClassReferenceType sn2 _ ) = eraseParameterizedType cpcrt
-      in getValidTypeQName sn1 == getValidTypeQName sn2
-  (==) cpct@(ClassPathCT _) lct@(LocalCT _) = lct == cpct
-  (==) (ClassPathCT cpcrt1) (ClassPathCT cpcrt2) = cpcrt1 == cpcrt2
-
-instance TypeCheckerValidTypeQualifiedName ValidTypeClassType where
-  getValidTypeQName (LocalCT (LocalClassReferenceType sn _)) = getValidTypeQName sn
-  getValidTypeQName (ClassPathCT (CPClassReferenceType sn _)) = getValidTypeQName sn
-  isValidTypeQNameInClasspath _ = False
-
-instance TypeCheckerClassReferenceType ValidTypeClassType where
-  getValidTypeRefTypeTypeName (LocalCT (LocalClassReferenceType vtn _)) = TypeCheckerValidTypeQualifiedNameWrapper vtn
-  getValidTypeRefTypeTypeName (ClassPathCT cprt) = getValidTypeRefTypeTypeName cprt
-  getValidTypeRefTypeTypeArguments (LocalCT _) = Nothing
-  getValidTypeRefTypeTypeArguments (ClassPathCT cprt) = getValidTypeRefTypeTypeArguments cprt
-
--}
+data ValidTypeTypeName = ValidTypeTypeName SourcePos TypeCheckerValidTypeQualifiedNameWrapper deriving Show
 
 data ValidTypeField = ValidTypeField { vfName :: (SimpleName, SourcePos)
-                                     , vfType :: TypeCheckerClassReferenceTypeWrapper
+                                     , vfType :: TypeCheckerJavaType
                                      , vfClassName :: TypeCheckerValidTypeQualifiedNameWrapper
                                      } deriving Show
 
 data ValidTypeMethod = ValidTypeMethod { vmName :: (SimpleName, SourcePos)
                                        , vmAccessFlags :: [MethodAccessFlag]
-                                       , vmType :: TypeCheckerClassReferenceTypeWrapper
+                                       , vmType :: TypeCheckerJavaType
                                        , vmParams :: V.Vector ValidTypeParameter
                                        , vmMaybeImpl :: Maybe ValidTypeMethodImplementation
                                        , vmClassName :: TypeCheckerValidTypeQualifiedNameWrapper
@@ -182,8 +162,8 @@ transformToValidTypes = do
   (_,classMap) <- get
   foldrM (\clazz accum -> do
       validTypeClassV <- getValidTypeClass clazz
-      return $ (:) <$> validTypeClassV <*> accum) 
-    (Val.Success []) 
+      return $ (:) <$> validTypeClassV <*> accum)
+    (Val.Success [])
     (Map.elems classMap)
 
 getValidTypeClass :: Clazz2 -> StateT ClassData IO (Val.Validation [TypeError] ValidTypeClazz)
@@ -198,23 +178,42 @@ getClassParentValidType :: Clazz2 -> StateT ClassData IO (Val.Validation [TypeEr
 getClassParentValidType (NewClazz2 pos _ _ _ ExtendsObject _ _) =
   return $
     Val.Success (createValidTypeClassTypeObject, pos)
-getClassParentValidType (NewClazz2 _ _ _ _ (NewExtends pos parent) _ _) = do
+getClassParentValidType (NewClazz2 _ _ _ _ (NewExtends pos parent typeArgs) _ _) = do
   vtqnE <- validateM [TypeError ("Undefined type: "++show parent) pos] getValidTypeQualifiedName parent
-  return $ (,) <$> (TypeCheckerClassReferenceTypeWrapper <$> vtqnE <*> pure Nothing) <*> pure pos
+  typeArgsE <- 
+    (\(Val.Success tas) -> 
+      case tas of 
+        [] -> Val.Success Nothing; 
+        xs -> Val.Success (Just (V.fromList xs))) 
+    <$> getValidTypeTypeArguments typeArgs
+  return $ (,) <$> (TypeCheckerClassReferenceTypeWrapper <$> vtqnE <*> typeArgsE) <*> pure pos
 
 getValidTypeFields :: Clazz2 -> TypeCheckerValidTypeQualifiedNameWrapper -> StateT ClassData IO (Val.Validation [TypeError] [ValidTypeField])
-getValidTypeFields (NewClazz2 _ _ _ _ _ fields _) vtqn = do
+getValidTypeFields (NewClazz2 _ _ _ _ _ fields _) vtqn =
   foldrM
-    (\field@(NewField (ClassType pos tp tpargs) npos nm) fieldList-> do
-      vtqnE <- validateM [TypeError ("Invalid type name: "++show tp) pos] getValidTypeQualifiedName tp
-      validTypeTypeArgumentsE <- mapValidTypeTypeArguments tpargs
-      let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
-            vtqnE <*>
-            fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
-      let validTypeFieldV = ValidTypeField (nm,npos) <$> crtwE <*> pure vtqn
-      return $ (:) <$> validTypeFieldV <*> fieldList)
+    (\field fieldList -> do
+      validTypeFieldE <- getValidTypeField vtqn field
+      return $ (:) <$> validTypeFieldE <*> fieldList)
     (Val.Success [])
     fields
+
+getValidTypeField :: TypeCheckerValidTypeQualifiedNameWrapper -> Field -> StateT ClassData IO (Val.Validation [TypeError] ValidTypeField)
+getValidTypeField vtqn field@(NewField (JavaReferenceType (ClassType pos tp tpargs)) npos nm) = do
+  vtqnE <- validateM [TypeError ("Invalid type name: "++show tp) pos] getValidTypeQualifiedName tp
+  validTypeTypeArgumentsE <- mapValidTypeTypeArguments tpargs
+  let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
+        vtqnE <*>
+        fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
+  let jtE = TypeCheckerJavaReferenceType <$> (TypeCheckerClassRefType <$> crtwE)
+  let validTypeFieldV = ValidTypeField (nm,npos) <$> jtE <*> pure vtqn
+  return validTypeFieldV
+getValidTypeField vtqn field@(NewField (JavaReferenceType _) npos nm) = undefined
+getValidTypeField vtqn field@(NewField (JavaPrimitiveType (PrimitiveIntegralType pos)) npos nm) = 
+  return $ Val.Success $
+    ValidTypeField (nm,npos) (TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType) vtqn
+getValidTypeField vtqn field@(NewField (JavaPrimitiveType (PrimitiveBooleanType pos)) npos nm) = 
+  return $ Val.Success $ 
+    ValidTypeField (nm,npos) (TypeCheckerJavaPrimitiveType TypeCheckerBooleanPrimitiveType) vtqn
 
 consEither :: Either [a] b -> Either [a] [b] -> Either [a] [b]
 consEither head list =
@@ -239,40 +238,76 @@ getValidTypeMethod method@(NewMethod pos vmAccessFlags nm params _ _ _) vtqnw = 
   returnValidTypeV <- getMethodReturnValidType method
   validTypeParamsV <- getValidTypeParams params
   validTypeExpressionV <- getMethodValidTypeExpression method
-  return $ ValidTypeMethod (nm,pos) vmAccessFlags <$> 
-    returnValidTypeV <*> 
-    fmap V.fromList validTypeParamsV <*> 
-    validTypeExpressionV <*> 
+  return $ ValidTypeMethod (nm,pos) vmAccessFlags <$>
+    returnValidTypeV <*>
+    fmap V.fromList validTypeParamsV <*>
+    validTypeExpressionV <*>
     pure vtqnw
 
-getMethodReturnValidType :: Method -> StateT ClassData IO (Val.Validation [TypeError] TypeCheckerClassReferenceTypeWrapper)
-getMethodReturnValidType (NewMethod _ _ _ _ tp@(ClassType pos qn typeArgs) _ _) = do
+getMethodReturnValidType :: Method -> StateT ClassData IO (Val.Validation [TypeError] TypeCheckerJavaType)
+getMethodReturnValidType (NewMethod _ _ _ _ (JavaReferenceType tp@(ClassType pos qn typeArgs)) _ _) = do
   validTypeNameE <- validateM [TypeError ("Undefined type: "++show tp) pos] getValidTypeQualifiedName qn
   validTypeTypeArgumentsE <- mapValidTypeTypeArguments typeArgs
   let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
         validTypeNameE <*>
         fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
-  return $ crtwE
+  let jtE = TypeCheckerJavaReferenceType <$> (TypeCheckerClassRefType <$> crtwE)
+  return jtE
+getMethodReturnValidType (NewMethod _ _ _ _ (JavaReferenceType _) _ _) = undefined
+getMethodReturnValidType (NewMethod _ _ _ _ (JavaPrimitiveType (PrimitiveIntegralType pos)) _ _) = 
+  return $ Val.Success $
+    TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType
+getMethodReturnValidType (NewMethod _ _ _ _ (JavaPrimitiveType (PrimitiveBooleanType pos)) _ _) = 
+  return $ Val.Success $
+    TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType
 
 getValidTypeParams :: [Parameter] -> StateT ClassData IO (Val.Validation [TypeError] [ValidTypeParameter])
-getValidTypeParams = 
-  foldrM (\(NewParameter tp@(ClassType pos qn typeArgs) nmpos nm) accum -> do
-    vtqnE <- validateM [TypeError ("Undefined type: "++show tp) pos] getValidTypeQualifiedName qn
-    validTypeTypeArgumentsE <- mapValidTypeTypeArguments typeArgs
-    let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
-          vtqnE <*>
-          fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
-    let vtpE = ValidTypeParameter (nm,nmpos) <$> crtwE
+getValidTypeParams =
+  foldrM (\param accum -> do
+    vtpE <- getValidTypeParam param
     return $ (:) <$> vtpE <*> accum)
   (Val.Success [])
-    
+
+getValidTypeParam :: Parameter -> StateT ClassData IO (Val.Validation [TypeError] ValidTypeParameter)
+getValidTypeParam (NewParameter (JavaReferenceType tp@(ClassType pos qn typeArgs)) nmpos nm) = do
+  vtqnE <- validateM [TypeError ("Undefined type: "++show tp) pos] getValidTypeQualifiedName qn
+  validTypeTypeArgumentsE <- mapValidTypeTypeArguments typeArgs
+  let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
+        vtqnE <*>
+        fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
+  let jtE = TypeCheckerJavaReferenceType <$> (TypeCheckerClassRefType <$> crtwE)
+  return $ ValidTypeParameter (nm,nmpos) <$> jtE
+getValidTypeParam (NewParameter (JavaReferenceType _) nmpos nm) = undefined
+getValidTypeParam (NewParameter (JavaPrimitiveType (PrimitiveIntegralType pos)) nmpos nm) = 
+  return $ Val.Success $ ValidTypeParameter (nm,nmpos) (TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType)
+getValidTypeParam (NewParameter (JavaPrimitiveType (PrimitiveBooleanType pos)) nmpos nm) = 
+  return $ Val.Success $ ValidTypeParameter (nm,nmpos) (TypeCheckerJavaPrimitiveType TypeCheckerBooleanPrimitiveType)
+
+getValidTypeTypeArguments :: [TypeArgument] -> StateT ClassData IO (Val.Validation [TypeError] [TypeCheckerTypeArgument])
+getValidTypeTypeArguments =
+  foldrM (\typeArg accum -> do
+    validTypeTypeArgE <- getValidTypeTypeArgument typeArg
+    return $ (:) <$> validTypeTypeArgE <*> accum)
+  (Val.Success [])
+
+getValidTypeTypeArgument :: TypeArgument -> StateT ClassData IO (Val.Validation [TypeError] TypeCheckerTypeArgument)
+getValidTypeTypeArgument (ReferenceTypeArgument tp@(ClassType pos qn typeArgs)) = do
+  vtqnE <- validateM [TypeError ("Undefined type: "++show tp) pos] getValidTypeQualifiedName qn
+  vtTypeArgsE <- getValidTypeTypeArguments typeArgs
+  let maybeTypeArgsE = if' <$> (null <$> vtTypeArgsE) <*> pure Nothing <*> (Just <$> (Vector.fromList <$> vtTypeArgsE))
+  let rtw = TypeCheckerClassRefType <$> (TypeCheckerClassReferenceTypeWrapper <$> vtqnE <*> maybeTypeArgsE)
+  return $ TypeCheckerTypeArgument Nothing <$> rtw
+getValidTypeTypeArgument (ReferenceTypeArgument tp@(TypeVariable pos sn)) = undefined
+getValidTypeTypeArgument (WildcardArgument _ ) = undefined
+
 {-- Get a list of terms from the arguments to a constructor or methdod -}
 getTermValidTypeArguments :: [Term] -> StateT ClassData IO (Val.Validation [TypeError] [ValidTypeTerm])
-getTermValidTypeArguments = 
+getTermValidTypeArguments =
   foldrM (\term accum -> do
     validTypeTermE <- getValidTypeTerm term
-    return $ (:) <$> validTypeTermE <*> accum) 
+    return $ (:) <$> validTypeTermE <*> accum)
   (Val.Success [])
+
 
 getMethodValidTypeExpression :: Method -> StateT ClassData IO (Val.Validation [TypeError] (Maybe ValidTypeMethodImplementation))
 getMethodValidTypeExpression (NewMethod _ _ _ _ _ _ (Just (MethodImpl term))) = do
@@ -282,12 +317,12 @@ getMethodValidTypeExpression (NewMethod _ _ _ _ _ _ (Just (ConstructorImpl (Left
   validTypeAssignmentsE <- getValidTypeAssignments assignments
   validTypeArgsE <- getTermValidTypeArguments args
   let constructorInvocationE = ValidTypeConstructorInvocation pos <$> validTypeArgsE
-  return $ Just <$> (mkValidTypeConstructorImplementation <$> constructorInvocationE <*> validTypeAssignmentsE) 
+  return $ Just <$> (mkValidTypeConstructorImplementation <$> constructorInvocationE <*> validTypeAssignmentsE)
 getMethodValidTypeExpression (NewMethod _ _ _ _ _ _ (Just (ConstructorImpl (Right (NewSuperConstructorInvocation pos args)) assignments))) = do
   validTypeAssignmentsE <- getValidTypeAssignments assignments
   validTypeArgsE <- getTermValidTypeArguments args
   let constructorInvocationE = ValidTypeSuperConstructorInvocation pos <$> validTypeArgsE
-  return $ Just <$> (mkValidTypeSuperConstructorImplementation <$> constructorInvocationE <*> validTypeAssignmentsE) 
+  return $ Just <$> (mkValidTypeSuperConstructorImplementation <$> constructorInvocationE <*> validTypeAssignmentsE)
 getMethodValidTypeExpression (NewMethod _ _ _ _ _ _ Nothing) =
   return $ Val.Success Nothing
 
@@ -301,7 +336,7 @@ getValidTypeAssignment :: Assignment -> StateT ClassData IO (Val.Validation [Typ
 getValidTypeAssignment (NewAssignment lpos t1 rpos t2) = do
   lhTermE <- getValidTypeTerm t1
   rhTermE <- getValidTypeTerm t2
-  return $ ValidTypeAssignment <$> lhTermE <*> rhTermE 
+  return $ ValidTypeAssignment <$> lhTermE <*> rhTermE
 
 {-- Convert a term to a valid term by confirming the validity of the term.
 -}
@@ -323,49 +358,45 @@ getValidTypeTerm (Cast (ClassType pos tp typeArgs) term) = do
   let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
         validTypeNameE <*>
         fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
-  let vtrtdE = ValidTypeRefTypeDeclaration pos <$> crtwE
+  let vtrtdE = ValidTypeRefTypeDeclaration pos <$> (TypeCheckerClassRefType <$> crtwE)
   return $ ValidTypeCast <$> vtrtdE <*> validTypeTermE
 getValidTypeTerm (Cast (TypeVariable pos tpvar) term) = undefined
 getValidTypeTerm (Application (ApplicationTargetTerm t) (FieldAccess pos nm)) = do
   validTypeTermE <- getValidTypeTerm t
-  return $ 
+  return $
     ValidTypeApplication <$>
       (ValidTypeApplicationTargetTerm <$> validTypeTermE) <*>
       pure (ValidTypeFieldAccess pos nm)
-getValidTypeTerm (Application (ApplicationTargetTerm t) (MethodInvocation pos nm args)) = do
+getValidTypeTerm (Application (ApplicationTargetTerm t) (MethodInvocation pos nm args typeArgs)) = do
   validTypeTermE <- getValidTypeTerm t
   validTypeArgsE <- getTermValidTypeArguments args
+  validTypeTypeArgsE <- getValidTypeTypeArguments typeArgs
   let att = ValidTypeApplicationTargetTerm <$> validTypeTermE
-  let mi = ValidTypeMethodInvocation pos nm <$> validTypeArgsE
+  let mi = ValidTypeMethodInvocation pos nm <$> validTypeArgsE <*> validTypeTypeArgsE
   return $ ValidTypeApplication <$> att <*> mi
 getValidTypeTerm (Application (ApplicationTargetTerm t) (SuperMethodInvocation pos nm args)) = do
   validTypeTermE <- getValidTypeTerm t
   validTypeArgsE <- getTermValidTypeArguments args
-  return $ 
-    ValidTypeApplication <$> 
+  return $
+    ValidTypeApplication <$>
       (ValidTypeApplicationTargetTerm <$> validTypeTermE) <*>
       (ValidTypeSuperMethodInvocation pos nm <$> validTypeArgsE)
 getValidTypeTerm (Application (ApplicationTargetTypeName (ClassType tppos tp _)) (FieldAccess pos nm)) = do
   validTypeNameE <- validateM [TypeError "Type not valid in this context" tppos] getValidTypeQualifiedName tp
-  let crtwE = TypeCheckerClassReferenceTypeWrapper <$> validTypeNameE <*> pure Nothing
-  let rtdE = ValidTypeRefTypeDeclaration tppos <$> crtwE
-  let attnE = ValidTypeApplicationTargetTypeName <$> rtdE
+  let attnE = ValidTypeApplicationTargetTypeName <$> (ValidTypeTypeName tppos <$> validTypeNameE)
   return $ ValidTypeApplication <$> attnE <*> pure (ValidTypeFieldAccess pos nm)
 getValidTypeTerm (Application (ApplicationTargetTypeName (TypeVariable tppos tpvar)) (FieldAccess pos nm)) = undefined
-getValidTypeTerm (Application (ApplicationTargetTypeName (ClassType tppos tp _)) (MethodInvocation pos nm args)) = do
+getValidTypeTerm (Application (ApplicationTargetTypeName (ClassType tppos tp _)) (MethodInvocation pos nm args typeArgs)) = do
   vtqnE <- validateM [TypeError "Type not valid in this context" tppos] getValidTypeQualifiedName tp
   validTypeArgsE <- getTermValidTypeArguments args
-  let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
-        vtqnE <*>
-        pure Nothing
-  let vmiE = ValidTypeMethodInvocation pos nm <$> validTypeArgsE
-  let vtrtdE = ValidTypeRefTypeDeclaration tppos <$> crtwE
-  let vtattnE = ValidTypeApplicationTargetTypeName <$> vtrtdE
+  validTypeTypeArgsE <- getValidTypeTypeArguments typeArgs
+  let vmiE = ValidTypeMethodInvocation pos nm <$> validTypeArgsE <*> validTypeTypeArgsE
+  let attnE = ValidTypeApplicationTargetTypeName <$> (ValidTypeTypeName tppos <$> vtqnE)
   return $
-    ValidTypeApplication <$> vtattnE <*> vmiE
+    ValidTypeApplication <$> attnE <*> vmiE
 getValidTypeTerm (Application (ApplicationTargetTypeName (ClassType tppos tp _)) (SuperMethodInvocation pos nm args)) = undefined
 
-getValidTypeTerm (Application (ApplicationTargetTypeName (TypeVariable tppos tpvar)) (MethodInvocation pos nm params)) = undefined
+getValidTypeTerm (Application (ApplicationTargetTypeName (TypeVariable tppos tpvar)) (MethodInvocation pos nm params _)) = undefined
 getValidTypeTerm (Application (ApplicationTargetTypeName (TypeVariable tppos tpvar)) (SuperMethodInvocation pos nm params)) = undefined
 getValidTypeTerm (Value (Variable pos sn)) = return $ Val.Success (ValidTypeValue (ValidTypeVariable pos sn))
 getValidTypeTerm (Value (IntegerLit pos i)) = return $ Val.Success (ValidTypeValue (ValidTypeIntegerLit pos i))
@@ -399,8 +430,8 @@ mapValidTypeTypeArgument :: TypeArgument -> StateT ClassData IO (Val.Validation 
 mapValidTypeTypeArgument (ReferenceTypeArgument (ClassType tppos qn typeArgs)) = do
   vtqnwE <- validateM [TypeError ("Type argument is not a valid type: "++show qn) tppos] getValidTypeQualifiedName qn
   validTypeArgsE <- mapValidTypeTypeArguments typeArgs
-  let crtwE = TypeCheckerClassReferenceTypeWrapper <$> 
-        vtqnwE <*> 
+  let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
+        vtqnwE <*>
         fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeArgsE
       crtE = TypeCheckerClassRefType <$> crtwE
       in

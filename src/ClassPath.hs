@@ -30,6 +30,7 @@ module ClassPath
 , getPackageClasses
 , mapMethodToParamTypeList
 , mapMethodToResultType
+, mapMethodToTypeParameterList
 , cInterfaceMaskedValue
 , cAbstractMaskedValue
 , cPublicMaskedValue
@@ -41,6 +42,7 @@ module ClassPath
 , createValidTypeNameObject
 , createValidTypeRefTypeObject
 , createValidTypeClassTypeObject
+, createValidTypeJavaTypeObject
 , createValidTypeNameInteger
 , createValidTypeRefTypeInteger
 , createValidTypeClassTypeInteger
@@ -83,6 +85,7 @@ import qualified Data.FlagSet as FS
 import TypeCheckerTypes
 import Data.ByteString (ByteString)
 import qualified Data.IntMap.Strict as List
+import qualified Control.Applicative as Vector
 
 type ClassReferenceMap = Map.Map T.Text ClassReference
 
@@ -122,7 +125,6 @@ data Field = Field { fname :: !T.Text
 data Method = Method { mname :: !T.Text
                      , mdescriptor :: !T.Text
                      , maccessFlags :: FS.T Word16 MethodAccessFlag
-                     , mclassTypeParameters :: Vector TypeCheckerTypeParameter
                      , mcClassName :: !TypeCheckerValidTypeQualifiedNameWrapper
                      }
 
@@ -223,6 +225,8 @@ createValidTypeNameObject = classPathValidTypeName createQNameObject
 createValidTypeRefTypeObject =  TypeCheckerClassRefType createValidTypeClassTypeObject
 
 createValidTypeClassTypeObject = TypeCheckerClassReferenceTypeWrapper createValidTypeNameObject Nothing
+
+createValidTypeJavaTypeObject = TypeCheckerJavaReferenceType createValidTypeRefTypeObject
 
 createValidTypeNameInteger = classPathValidTypeName createQNameInteger
 
@@ -337,20 +341,6 @@ getFieldContextTypeParameters :: Field -> [TypeCheckerTypeParameter]
 getFieldContextTypeParameters Field {..} =
   V.toList fclassTypeParameters
 
-{-- Get an ordered list of type parameters in the method context. Method context includes
-    class type parameters followed by method type parameters. 
--}
-getMethodContextTypeParameters :: Method -> [TypeCheckerTypeParameter]
-getMethodContextTypeParameters Method {..} =
-  let (methodTypeParams,_,_) = case
-          runParser parseMethodSignature () "" (T.unpack mdescriptor)
-        of
-          Left e -> trace ("Parse descriptor failure: "++T.unpack mdescriptor++show e) undefined
-          Right r -> r
-  in
-    V.toList mclassTypeParameters ++ methodTypeParams
-
-
 mapMethodToResultType :: Method -> ClassPathType
 mapMethodToResultType Method {..} =
   let (_,_,resultType) = case
@@ -360,6 +350,16 @@ mapMethodToResultType Method {..} =
           Right r -> r
   in
     mapJavaTypeSignatureToClassPathType resultType
+
+mapMethodToTypeParameterList :: Method -> [TypeCheckerTypeParameter]
+mapMethodToTypeParameterList Method {..} =
+  let (typeParams,_,_) = case
+          runParser parseMethodSignature () "" (T.unpack mdescriptor)
+        of
+          Left e -> trace ("Parse descriptor failure: "++T.unpack mdescriptor++show e) undefined
+          Right r -> r
+  in
+    typeParams
 
 parseMethodDescriptor :: T.Text -> ([ClassPathType],ClassPathType)
 parseMethodDescriptor t =
@@ -879,7 +879,6 @@ createClassDescriptor classFile@ClassFile {..} =
             mdescriptor = case maybeMethodSignatureText of
               Nothing -> getUtf8FromConstantPool classFile (mi_descriptor_index mi)
               Just methodSig -> methodSig
-            mclassTypeParameters = typeParameters
             mcClassName = name
         in
           Method {..}

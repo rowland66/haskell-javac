@@ -26,6 +26,7 @@ module TypeInfo
 , getTypePotentiallyApplicableMethods
 , isTypeSupported
 , isTypeParameterized
+, isTypePrimitive
 , getFieldName
 , getFieldType
 , getFieldAttributes
@@ -33,6 +34,7 @@ module TypeInfo
 , getMethodName
 , getMethodType
 , getMethodParams
+, getMethodTypeParameters
 , getMethodAttributes
 , getMethodSignature
 , getMethodClassName
@@ -42,6 +44,7 @@ module TypeInfo
 , getErasedType
 , getTypeImplements
 , getTypeClassReferenceType
+, convertTypeCheckerJavaType
 ) where
 
 import qualified Data.Text as T
@@ -94,9 +97,8 @@ class TypeInfo_ t where
   {-- Get a list of method declartions that are potentially applicable to the provided MethodSignature -}
   getTypePotentiallyApplicableMethods :: t -> MethodSignature -> StateT ValidTypeClassData IO [MethodDeclaration]
   getTypePotentiallyApplicableMethods ti signature@(MethodSignature searchName searchParams) = do
-    let candidateMatchingMethods = List.filter 
-          (\(MethodDeclaration m) ->
-              P.deconstructSimpleName (getMethodName m) == searchName)
+    let candidateMatchingMethods = List.filter
+          (\(MethodDeclaration m) -> getMethodName m == searchName)
           (getTypeMethods ti)
     let returnList = List.filter (\(MethodDeclaration m) ->
           length (getMethodParams m) == length searchParams) candidateMatchingMethods
@@ -137,7 +139,7 @@ class Field_ f where
 
 instance Field_ ValidTypeField where
   getFieldName ValidTypeField {..} = fst vfName
-  getFieldType ValidTypeField {..} = L vfType
+  getFieldType ValidTypeField {..} = convertTypeCheckerJavaType vfType
   getFieldAttributes ValidTypeField {..} = FieldAttributes { faStatic=False }
   getFieldClassName ValidTypeField{..} = vfClassName
 
@@ -151,31 +153,34 @@ class Method_ m where
   getMethodName :: m -> P.SimpleName
   getMethodType :: m -> Type
   getMethodParams :: m -> [Type]
+  getMethodTypeParameters :: m -> [TypeCheckerTypeParameter]
   getMethodAttributes :: m -> MethodAttributes
   getMethodSignature :: m -> MethodSignature
   getMethodClassName :: m -> TypeCheckerValidTypeQualifiedNameWrapper
 
 instance Method_ ValidTypeMethod where
   getMethodName ValidTypeMethod {..} = fst vmName
-  getMethodType ValidTypeMethod {..} = L vmType
-  getMethodParams ValidTypeMethod {..} = fmap (L . vpType) (V.toList vmParams)
+  getMethodType ValidTypeMethod {..} = convertTypeCheckerJavaType vmType
+  getMethodParams ValidTypeMethod {..} = fmap (convertTypeCheckerJavaType . vpType) (V.toList vmParams)
+  getMethodTypeParameters ValidTypeMethod {..} = []
   getMethodAttributes ValidTypeMethod {..} = MethodAttributes { maStatic=False
                                                               , maAbstract=case vmMaybeImpl of Just _ -> False; Nothing -> True
                                                               }
   getMethodSignature method@ValidTypeMethod {..} =
     let (SimpleName mname, _) = vmName
     in
-      MethodSignature mname (getMethodParams method)
+      MethodSignature (SimpleName mname) (getMethodParams method)
   getMethodClassName ValidTypeMethod{..} = vmClassName
 
 instance Method_ Method where
   getMethodName CP.Method {..} = P.constructSimpleName mname
   getMethodType m = convertClassPathType (mapMethodToResultType m)
   getMethodParams m = fmap convertClassPathType (CP.mapMethodToParamTypeList m)
+  getMethodTypeParameters m = CP.mapMethodToTypeParameterList m
   getMethodAttributes CP.Method {..} =  MethodAttributes { maStatic=FS.match maccessFlags CP.mStaticMaskedValue
                                                          , maAbstract=FS.match maccessFlags CP.mAbstractMaskedValue
                                                          }
-  getMethodSignature method = MethodSignature (mname method) (getMethodParams method)
+  getMethodSignature method = MethodSignature (SimpleName (mname method)) (getMethodParams method)
   getMethodClassName CP.Method{..} = mcClassName
 
 data ClassAccessFlags = ClassAccessFlags { caAbstract :: Bool
@@ -187,10 +192,13 @@ newtype FieldAttributes = FieldAttributes {faStatic :: Bool} deriving Show
 
 data FieldDeclaration = forall f.(Field_ f) => FieldDeclaration f
 
+instance Show FieldDeclaration where
+  show (FieldDeclaration f) = show (getFieldType f)++" "++show (getFieldName f)
+
 type TypeParamEnvironment = Map.Map SimpleName TypeCheckerReferenceTypeWrapper
 
-data MethodSignature = MethodSignature T.Text [Type] deriving Eq
-
+data MethodSignature = MethodSignature SimpleName [Type] deriving Eq
+  
 data MethodAttributes = MethodAttributes { maStatic :: Bool
                                          , maAbstract :: Bool
                                          } deriving Show
@@ -211,6 +219,15 @@ instance Show MethodDeclaration where
       show name ++
       ("(" ++ (if null params then "" else List.intercalate "," (fmap show params)) ++ ")")
 
+instance Method_ MethodDeclaration where
+  getMethodName (MethodDeclaration m) = getMethodName m
+  getMethodType (MethodDeclaration m) = getMethodType m
+  getMethodParams (MethodDeclaration m) = getMethodParams m
+  getMethodTypeParameters (MethodDeclaration m) = getMethodTypeParameters m
+  getMethodAttributes (MethodDeclaration m) = getMethodAttributes m
+  getMethodSignature (MethodDeclaration m) = getMethodSignature m
+  getMethodClassName (MethodDeclaration m) = getMethodClassName m
+
 data Type = I
           | Z
           | U -- Unsupported primitive
@@ -228,7 +245,7 @@ instance Eq Type where
   (==) t1 t2 = show t1 == show t2
 
 instance Show MethodSignature where
-  show (MethodSignature nm paramTypes) = T.unpack nm++"("++List.intercalate "," (fmap show paramTypes)++")"
+  show (MethodSignature nm paramTypes) = show nm++"("++List.intercalate "," (fmap show paramTypes)++")"
 
 convertClassPathType :: ClassPathType -> Type
 convertClassPathType cpt | isClassPathTypeBoolean cpt = Z
@@ -245,6 +262,14 @@ convertClassPathType cpt  | case getClassPathTypeVariable cpt of
                           = maybe undefined T (getClassPathTypeVariable cpt)
 convertClassPathType cpt = trace ("Unsupported ClassPathType: "++show cpt) U
 
+convertTypeCheckerJavaType :: TypeCheckerJavaType -> Type
+convertTypeCheckerJavaType (TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType) = I
+convertTypeCheckerJavaType (TypeCheckerJavaPrimitiveType TypeCheckerBooleanPrimitiveType) = Z
+convertTypeCheckerJavaType (TypeCheckerJavaReferenceType (TypeCheckerClassRefType crtw)) = L crtw
+convertTypeCheckerJavaType (TypeCheckerJavaReferenceType (TypeCheckerTypeVariableRefType sn)) = T sn
+convertTypeCheckerJavaType (TypeCheckerJavaReferenceType (TypeCheckerArrayRefType crtw)) = undefined
+
+
 isTypeSupported :: Type -> Bool
 isTypeSupported I = True
 isTypeSupported Z = True
@@ -259,6 +284,11 @@ isTypeParameterized U = False
 isTypeParameterized (L (TypeCheckerClassReferenceTypeWrapper _ (Just _))) = True
 isTypeParameterized (L (TypeCheckerClassReferenceTypeWrapper _ Nothing)) = False
 isTypeParameterized (T _) = False
+
+isTypePrimitive :: Type -> Bool
+isTypePrimitive I = True
+isTypePrimitive Z = True
+isTypePrimitive _ = False
 
 getClassTypeInfo :: TypeCheckerClassReferenceTypeWrapper -> StateT ValidTypeClassData IO TypeInfo
 getClassTypeInfo (TypeCheckerClassReferenceTypeWrapper vtqnw _) = getClassTypeInfo' vtqnw
@@ -301,15 +331,15 @@ getErasedTypeName :: TypeCheckerClassReferenceTypeWrapper -> TypeCheckerValidTyp
 getErasedTypeName (TypeCheckerClassReferenceTypeWrapper vtqn _) = vtqn
 
 getErasedMethodSignature :: [TypeCheckerTypeParameter] -> MethodDeclaration -> MethodSignature
-getErasedMethodSignature typeParams (MethodDeclaration method) = 
-  MethodSignature (showt (getMethodName method)) (getErasedMethodParams typeParams (getMethodParams method))
+getErasedMethodSignature typeParams (MethodDeclaration method) =
+  MethodSignature (getMethodName method) (getErasedMethodParams typeParams (getMethodParams method))
 
 getErasedMethodParams :: [TypeCheckerTypeParameter] -> [Type] -> [Type]
 getErasedMethodParams typeParams = fmap (getErasedType typeParams)
 
 getErasedType :: [TypeCheckerTypeParameter] -> Type -> Type
 getErasedType _ (L (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)) =
-  eraseParameterizedType (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)
+  eraseParameterizedType (TypeCheckerJavaReferenceType (TypeCheckerClassRefType (TypeCheckerClassReferenceTypeWrapper cpvtn maybeTypeArgs)))
 getErasedType typeParams (T sn) = eraseTypeVariable typeParams sn
 --getErasedType typeParams (A cpt) = eraseRefType typeParams cpt
 getErasedType _ cpt = cpt
@@ -324,8 +354,12 @@ eraseTypeVariable typeParams tv =
       Just (TypeCheckerTypeParameter sn (Just (TypeCheckerClassTypeTypeBound classBound _))) -> getErasedType typeParams (L classBound)
       Just (TypeCheckerTypeParameter sn (Just (TypeCheckerTypeVariableTypeBound tvBound))) -> getErasedType typeParams (T tvBound)
 
-eraseParameterizedType :: TypeCheckerClassReferenceTypeWrapper -> Type
-eraseParameterizedType (TypeCheckerClassReferenceTypeWrapper validQn _) = L (TypeCheckerClassReferenceTypeWrapper validQn Nothing)
+eraseParameterizedType :: TypeCheckerJavaType -> Type
+eraseParameterizedType (TypeCheckerJavaReferenceType (TypeCheckerClassRefType (TypeCheckerClassReferenceTypeWrapper validQn _))) = 
+  L (TypeCheckerClassReferenceTypeWrapper validQn Nothing)
+eraseParameterizedType (TypeCheckerJavaReferenceType (TypeCheckerTypeVariableRefType _)) = undefined 
+eraseParameterizedType (TypeCheckerJavaReferenceType (TypeCheckerArrayRefType _)) = undefined 
+eraseParameterizedType pt@(TypeCheckerJavaPrimitiveType _) = convertTypeCheckerJavaType pt
 
 getTypeClassReferenceType :: Type -> TypeCheckerClassReferenceTypeWrapper
 getTypeClassReferenceType (L crtw) = crtw

@@ -1,13 +1,21 @@
 package test;
 
+import java.util.AbstractSequentialList;
 import java.util.LinkedList;
+import java.util.ListIterator;
 
-public class FunnyList<F> extends LinkedList<String> {
+public class FunnyList<F> extends AbstractSequentialList<String> {
 
-    private static LinkedList<String> staticVar;
+    private LinkedList<String> l = new LinkedList<>();
 
     @Override
-    public String getFirst() {
-        return super.getFirst();
+    public ListIterator<String> listIterator(int index) {
+        return l.listIterator();
     }
+
+    @Override
+    public int size() {
+        return 0;
+    }
+
 }

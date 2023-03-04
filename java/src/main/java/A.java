@@ -4,15 +4,15 @@ import java.util.Vector;
 import java.util.List;
 import java.util.LinkedList;
 import java.util.TimeZone;
-import test.FunnyList;
 
 class A extends Object {
   String foo;
   String foo2;
   Integer bar;
   Boolean b;
+  int c;
 
-  Vector<List<Integer>> v;
+  Vector<Number> v;
   List<Integer> e;
 
   A() {
@@ -21,7 +21,8 @@ class A extends Object {
     this.foo2 = "Smith";
     this.bar = 5;
     this.b = true;
-    this.v = new Vector<List<Integer>>();
+    this.c = 0;
+    this.v = new Vector<Number>();
     this.e = new LinkedList<Integer>();
   }
 
@@ -55,10 +56,10 @@ class A extends Object {
   */
 
   Boolean testPut(List<Integer> a) {
-    return this.v.add(a);
+    return this.v.addAll(a);
   }
 
-  List<Integer> testGet() {
+  Number testGet() {
     return this.v.get(0);
   }
 
@@ -103,6 +104,22 @@ class A extends Object {
     return this.bar.bitCount(this.bar);
   }
   
+  List<Integer> createList(Integer a, Integer b, Integer c) {
+    return List.<Integer>of(a,b,c);
+  }
+
+  Integer getListInt() {
+    return this.createList(1,2,3).get(1);
+  }
+  
+  Integer getStringFromIntList() {
+    return this.getStringFromInt(this.createList(1,2,3).get(0), 12);
+  }
+
+/**
+  List<? super Integer> copyList(List<Number> x) {
+    return List.<Number>copyOf(x);
+  } */
 }
 /**
 class StringReaderTest extends Object {

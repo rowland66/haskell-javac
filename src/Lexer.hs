@@ -32,6 +32,9 @@ data Token = Ide T.Text
            | IntegerLiteral Int32
            | StringLiteral String
            | BooleanLiteral Bool
+           | NullLiteral
+           | IntegralTypeTok
+           | BooleanTypeTok
     deriving (Show, Eq)
 
 type TokenPos = (Token, SourcePos)
@@ -80,12 +83,20 @@ quotedString = do
 boolean :: Parser TokenPos
 boolean = do
   pos <- getPosition
-  r <- try (string "true") <|> try (string "false")
+  r <- try (do {b' <- string "true"; notFollowedBy $ oneOf javaAlphaNum; return b' }) <|> 
+       try (do {b' <- string "false"; notFollowedBy $ oneOf javaAlphaNum; return b' })
   spaces
   return $ flip (,) pos $ case r of 
                             "true" -> BooleanLiteral True
                             "false" -> BooleanLiteral False
                             _ -> undefined
+
+null :: Parser TokenPos
+null = do
+  pos <- getPosition
+  r <- try (do {n' <- string "null"; notFollowedBy $ oneOf javaAlphaNum; return n' })
+  spaces
+  return (NullLiteral, pos)
 
 escDoubleQuote :: Parser Char
 escDoubleQuote = fmap (const '"') (try $ string "\\\"")
@@ -131,22 +142,36 @@ singleLineComment = do
   string "//"
   manyTill anyChar (try endOfLine) 
 
+primitiveType :: Parser TokenPos
+primitiveType = do
+  pos <- getPosition
+  r <- try (do { p' <- string "int"; notFollowedBy $ oneOf javaAlphaNum; return p' }) <|> 
+       try (do { p' <- string "boolean"; notFollowedBy $ oneOf javaAlphaNum; return p' })
+  spaces
+  return $ flip (,) pos $ case r of
+    "int" -> IntegralTypeTok
+    "boolean" -> BooleanTypeTok
+    _ -> undefined
+
 keywords =
   try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" 
    <|> keyword "return" <|> keyword "package" <|> keyword "import" <|> keyword "abstract")
 
 keyword kw = do
   p <- getPosition
-  k <- try (do {k' <- string kw; notFollowedBy $ oneOf (['A'..'Z'] ++ ['a'..'z'] ++ "_" ++ ['0'..'9']); return k' })
+  k <- try (do {k' <- string kw; notFollowedBy $ oneOf javaAlphaNum; return k' })
   return (Keyword k,p)
 
+javaAlphaNum = ['A'..'Z'] ++ ['a'..'z'] ++ "_" ++ ['0'..'9']
+
 literal =
-  try decimalNumeral <|> quotedString <|> boolean
+  try decimalNumeral <|> quotedString <|> boolean <|> Lexer.null
 
 token :: Parser TokenPos
 token = choice
     [ keywords
     , literal
+    , primitiveType
     , ide
     , lbrace
     , rbrace

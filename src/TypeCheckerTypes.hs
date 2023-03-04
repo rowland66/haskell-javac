@@ -6,6 +6,8 @@ module TypeCheckerTypes
   ( SimpleName (..)
   , QualifiedName (..)
   , TypeCheckerValidTypeQualifiedNameWrapper(..)
+  , TypeCheckerJavaType(..)
+  , TypeCheckerPrimitiveType(..)
   , TypeCheckerClassReferenceTypeWrapper(..)
   , TypeCheckerReferenceTypeWrapper(..)
   , TypeCheckerTypeArgument(..)
@@ -21,7 +23,9 @@ module TypeCheckerTypes
   , deconstructSimpleName
   , deconstructQualifiedName
   , getTypeCheckerClassReferenceTypeClassName
+  , isTypeCheckerClassReferenceTypeParameterized
   , getTypeCheckReferenceTypeClassReferenceType
+  , getTypeCheckerClassReferenceTypeTypeArguments
   , ClassAccessFlag(..)
   , MethodAccessFlag(..)
   , FieldAccessFlag(..)
@@ -38,8 +42,22 @@ import TextShow
 
 data QualifiedName = QualifiedName [T.Text] SimpleName deriving (Eq, Ord)
 
-data TypeCheckerClassReferenceTypeWrapper = TypeCheckerClassReferenceTypeWrapper 
-                                              TypeCheckerValidTypeQualifiedNameWrapper 
+data TypeCheckerJavaType = TypeCheckerJavaPrimitiveType TypeCheckerPrimitiveType
+                         | TypeCheckerJavaReferenceType TypeCheckerReferenceTypeWrapper
+                         deriving (Eq)
+
+instance Show TypeCheckerJavaType where
+  show (TypeCheckerJavaPrimitiveType jpt) = show jpt
+  show (TypeCheckerJavaReferenceType jrt) = show jrt
+
+data TypeCheckerPrimitiveType = TypeCheckerIntegerPrimitiveType | TypeCheckerBooleanPrimitiveType deriving (Eq)
+
+instance Show TypeCheckerPrimitiveType where
+  show TypeCheckerIntegerPrimitiveType = "I"
+  show TypeCheckerBooleanPrimitiveType = "Z"
+
+data TypeCheckerClassReferenceTypeWrapper = TypeCheckerClassReferenceTypeWrapper
+                                              TypeCheckerValidTypeQualifiedNameWrapper
                                               (Maybe (V.Vector TypeCheckerTypeArgument))
 
 instance Show TypeCheckerClassReferenceTypeWrapper where
@@ -63,11 +81,19 @@ instance Eq TypeCheckerClassReferenceTypeWrapper where
 instance Ord TypeCheckerClassReferenceTypeWrapper where
   compare (TypeCheckerClassReferenceTypeWrapper ct1 _) (TypeCheckerClassReferenceTypeWrapper ct2 _) = compare ct1 ct2
 
-getTypeCheckerClassReferenceTypeClassName :: 
+getTypeCheckerClassReferenceTypeClassName ::
   TypeCheckerClassReferenceTypeWrapper -> TypeCheckerValidTypeQualifiedNameWrapper
 getTypeCheckerClassReferenceTypeClassName (TypeCheckerClassReferenceTypeWrapper vtn _) = vtn
 
-data TypeCheckerReferenceTypeWrapper = TypeCheckerClassRefType 
+isTypeCheckerClassReferenceTypeParameterized :: TypeCheckerClassReferenceTypeWrapper -> Bool
+isTypeCheckerClassReferenceTypeParameterized (TypeCheckerClassReferenceTypeWrapper _ (Just _)) = True
+isTypeCheckerClassReferenceTypeParameterized _ = False
+
+getTypeCheckerClassReferenceTypeTypeArguments :: TypeCheckerClassReferenceTypeWrapper -> V.Vector TypeCheckerTypeArgument
+getTypeCheckerClassReferenceTypeTypeArguments (TypeCheckerClassReferenceTypeWrapper _ (Just typeArgs)) = typeArgs
+getTypeCheckerClassReferenceTypeTypeArguments _ = V.empty
+
+data TypeCheckerReferenceTypeWrapper = TypeCheckerClassRefType
                                          TypeCheckerClassReferenceTypeWrapper
                                      | TypeCheckerTypeVariableRefType SimpleName
                                      | TypeCheckerArrayRefType TypeCheckerReferenceTypeWrapper
@@ -93,7 +119,7 @@ instance Show TypeCheckerValidTypeQualifiedNameWrapper where
   show vtqnw = show (getValidTypeQName vtqnw)
 
 instance Eq TypeCheckerValidTypeQualifiedNameWrapper where
-  (==) a b = 
+  (==) a b =
     getValidTypeQName a == getValidTypeQName b
 
 instance Ord TypeCheckerValidTypeQualifiedNameWrapper where

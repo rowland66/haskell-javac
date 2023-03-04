@@ -15,19 +15,20 @@ import Control.Monad ( foldM )
 import Data.Int (Int64)
 import qualified Parser as P
 import qualified Parser2 as P2
-import TypeInfo(Type(..))
+import TypeInfo(Type(..),convertTypeCheckerJavaType)
 import TypeValidator
 import TypeCheckerTypes
 import ConstantPoolBuilder ( ConstantPoolST, addClass, addUtf8 )
 
-data StackMapFrame = StackMapFrame { locals :: [P.QualifiedName], stack :: [Type]} deriving Show
+data StackMapFrame = StackMapFrame { locals :: [Type], stack :: [Type]} deriving Show
 
 data StackMapFrameWithOffset = StackMapFrameWithOffset Int64 StackMapFrame
 
-startingStackFrame :: P.QualifiedName -> [ValidTypeParameter] -> StackMapFrame
+startingStackFrame :: Type -> [ValidTypeParameter] -> StackMapFrame
 startingStackFrame className params =
-  let paramTypes = fmap ((\(TypeCheckerClassReferenceTypeWrapper vtqnw _) -> getValidTypeQName vtqnw) 
-                       . (\ValidTypeParameter {..} -> vpType)) params
+  let paramTypes = fmap 
+        (\ValidTypeParameter {..} -> convertTypeCheckerJavaType vpType)
+        params
   in
     StackMapFrame { locals=className:paramTypes, stack=[] }
 
@@ -50,7 +51,7 @@ createStackTableAttribute stackFrameMapBytesList = do
 
 createStackMapFrameByteString :: StackMapFrameWithOffset -> ConstantPoolST B.ByteString
 createStackMapFrameByteString (StackMapFrameWithOffset offset StackMapFrame {..}) = do
-  localVariableInfoBytes <- foldM (\b qn -> (b <>) <$> objectVariableInfo qn) mempty locals
+  localVariableInfoBytes <- foldM (\b tp -> (b <>) <$> mapTypeToVariableInfo tp) mempty locals
   stackInfoBytes <- foldM (\b tp -> (b <>) <$> mapTypeToVariableInfo tp) mempty (reverse stack)
   return $ toLazyByteString $ word8 0xFF
                            <> word16BE (fromIntegral offset)

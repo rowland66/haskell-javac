@@ -4,7 +4,8 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE StrictData #-}
 
-{-- Parse a stream of tokens into a Map of Clazz's. Each Clazz has Fields, Constructors and Methods that contain tokens. -}
+{-- Parse a stream of tokens into a Map of Clazz's. Each Clazz has Fields, Constructors and Methods that contain lists of tokens. 
+    This class parses the basic structure of class, but not specific details of field and method declarations. -}
 
 module Parser
   ( satisfy
@@ -35,8 +36,8 @@ module Parser
   , QualifiedName
   , SimpleName
   , CompilationUnit(..)
-  , parseCompilationUnit
   , NameToPackageMap
+  , parseCompilationUnit
   ) where
 
 import Data.Functor.Identity (Identity)
@@ -84,6 +85,7 @@ parseCompilationUnit cp defaultNameMapping toks = do
   simpleNameToPackageMap <- createSimpleNameToPackageMap cp defaultNameMapping importDeclarationsList
   parseTypeDeclarations toks'' (CompilationUnit {classpath=cp, package=package, imports=simpleNameToPackageMap, types=[]})
 
+{-- Parse type declarations until the tokens in the compilation unit have been exhausted -}
 parseTypeDeclarations ::  [TokenPos] -> CompilationUnit -> Either ParseError [Clazz]
 parseTypeDeclarations [] CompilationUnit {..} = Right types
 parseTypeDeclarations toks compUnit = do
@@ -150,6 +152,16 @@ mapImportToNamePackagePairs cp (TypeImportOnDemand pos package) =
     Nothing -> Left $ newErrorMessage (Message "Unkown package") pos
     Just txts -> Right (fmap (, package) txts)
 
+javaType :: (Stream s Identity (Token, SourcePos)) => Parsec s u [TokenPos]
+javaType = do
+  maybePrimitiveType <- optionMaybe satisfyPrimitiveType
+  case maybePrimitiveType of
+    Just pt -> return [pt]
+    Nothing -> do
+      tp <- satisfyQualifiedName
+      maybeTypeArguments <- optionMaybe typeArgumentList
+      return (tp++fromMaybe [] maybeTypeArguments)
+
 clazzClause :: (Stream s Identity (Token, SourcePos)) => Parsec s u (SimpleName, SourcePos)
 clazzClause = do
   satisfyKeyword "class"
@@ -159,15 +171,18 @@ clazzClause = do
 extendsClause :: (Stream s Identity (Token, SourcePos)) => Parsec s u [TokenPos]
 extendsClause = do
   satisfyKeyword "extends"
-  satisfyQualifiedName
+  tp <- satisfyQualifiedName
+  maybeTypeArguments <- optionMaybe typeArgumentList
+  case maybeTypeArguments of
+    Nothing -> return tp
+    Just typeArgs -> return $ tp++typeArgs
 
 fieldDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s u ClazzMember
 fieldDeclaration = do
-  tp <- satisfyQualifiedName
-  maybeTypeArguments <- optionMaybe typeArgumentList
+  javaTypeTokens <- javaType
   name <- satisfySimpleName
   satisfy Semi
-  return $ FieldMember (NewField (tp++fromMaybe [] maybeTypeArguments) name)
+  return $ FieldMember (NewField javaTypeTokens name)
 
 parameterList :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
 parameterList = do
@@ -202,15 +217,14 @@ constructorDeclaration className = do
 methodDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s u ClazzMember
 methodDeclaration = do
   abs <- try $ optionMaybe $ satisfyKeyword "abstract"
-  tp <- satisfyQualifiedName
-  maybeTypeArguments <- optionMaybe typeArgumentList
+  javaTypeTokens <- javaType
   name <- satisfySimpleName
   params <- parameterList
   case abs of
     Just _ -> do
       satisfy Semi;
-      return ((MethodMember . NewMethod [MAbstract] (tp++fromMaybe [] maybeTypeArguments) name params) EmptyBody)
-    Nothing -> MethodMember . NewMethod [] (tp++fromMaybe [] maybeTypeArguments) name params <$> methodBody
+      return ((MethodMember . NewMethod [MAbstract] javaTypeTokens name params) EmptyBody)
+    Nothing -> MethodMember . NewMethod [] javaTypeTokens name params <$> methodBody
 
 methodBody :: (Stream s Identity (Token, SourcePos)) => Parsec s u Body
 methodBody = do
@@ -238,12 +252,9 @@ clazzDeclaration = do
   let af = case maybeAbstract of Just _ -> [CAbstract]; Nothing -> []
   let newClazz = NewClazz
                    pos cu (QualifiedName package clazz) af maybeSuperClazz
-                   (extractField <$> filter (\case (FieldMember _) -> True; _ -> False) clazzMembers)
-                   (extractConstructor <$> filter (\case (ConstructorMember _) -> True; _ -> False) clazzMembers)
-                   (extractMethod <$> filter (\case (MethodMember _) -> True; _ -> False) clazzMembers)
-                   where extractField (FieldMember f) = f
-                         extractConstructor (ConstructorMember c) = c
-                         extractMethod (MethodMember m) = m
+                   ((\(FieldMember f) -> f) <$> filter (\case (FieldMember _) -> True; _ -> False) clazzMembers)
+                   ((\(ConstructorMember c) -> c) <$> filter (\case (ConstructorMember _) -> True; _ -> False) clazzMembers)
+                   ((\(MethodMember m) -> m) <$> filter (\case (MethodMember _) -> True; _ -> False) clazzMembers)
   return (CompilationUnit {types=newClazz:types, ..}, rest)
 
 satisfyAny :: (Stream s Identity (Token, SourcePos)) => Parsec s u (SourcePos,Token)
@@ -270,6 +281,10 @@ satisfySimpleName :: (Stream s Identity (Token, SourcePos)) => Parsec s u TokenP
 satisfySimpleName = token (\(tok, pos) -> show tok)
                           snd
                           (\(tok, pos) -> case tok of Ide _ -> Just (tok,pos); _ -> Nothing)
+
+satisfyPrimitiveType :: (Stream s Identity (Token, SourcePos)) => Parsec s u TokenPos
+satisfyPrimitiveType = do
+  try (satisfy IntegralTypeTok <|> satisfy BooleanTypeTok)
 
 satisfyQualifiedName :: (Stream s Identity TokenPos) => Parsec s u [TokenPos]
 satisfyQualifiedName = do

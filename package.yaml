@@ -38,6 +38,7 @@ dependencies:
 - monad-loops
 - enumset
 - validation
+- cond
 
 library:
   source-dirs: src
