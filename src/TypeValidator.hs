@@ -77,7 +77,7 @@ data ValidTypeValue = ValidTypeVariable SourcePos SimpleName
                     | ValidTypeIntegerLit SourcePos Int32
                     | ValidTypeStringLit SourcePos String
                     | ValidTypeBooleanLit SourcePos Bool
-                    | ValidTypeObjectCreation SourcePos TypeCheckerClassReferenceTypeWrapper [ValidTypeTerm]
+                    | ValidTypeObjectCreation SourcePos TypeCheckerClassReferenceTypeWrapper [ValidTypeTerm] [TypeCheckerTypeArgument]
                     deriving Show
 
 data ValidTypeApplicationTarget = ValidTypeApplicationTargetTerm ValidTypeTerm
@@ -341,16 +341,17 @@ getValidTypeAssignment (NewAssignment lpos t1 rpos t2) = do
 {-- Convert a term to a valid term by confirming the validity of the term.
 -}
 getValidTypeTerm :: Term -> StateT ClassData IO (Val.Validation [TypeError] ValidTypeTerm)
-getValidTypeTerm (Value (ObjectCreation pos (ClassType tppos tp typeArgs) args)) = do
+getValidTypeTerm (Value (ObjectCreation pos (ClassType tppos tp typeArgs) args constructorTypeArgs)) = do
   validTypeNameE <- validateM [TypeError ("Undefined type: "++show tp) pos] getValidTypeQualifiedName tp
   validTypeArgumentsE <- getTermValidTypeArguments args
   validTypeTypeArgumentsE <- mapValidTypeTypeArguments typeArgs
   let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
         validTypeNameE <*>
         fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeTypeArgumentsE
-  let vtocE = ValidTypeObjectCreation pos <$> crtwE <*> validTypeArgumentsE
+  validTypeConstructorTypeArgsE <- getValidTypeTypeArguments typeArgs
+  let vtocE = ValidTypeObjectCreation pos <$> crtwE <*> validTypeArgumentsE <*> validTypeConstructorTypeArgsE
   return $ ValidTypeValue <$> vtocE
-getValidTypeTerm (Value (ObjectCreation pos (TypeVariable tppos tpvar) args)) = undefined
+getValidTypeTerm (Value (ObjectCreation pos (TypeVariable tppos tpvar) args constructorTypeArgs)) = undefined
 getValidTypeTerm (Cast (ClassType pos tp typeArgs) term) = do
   validTypeNameE <- validateM [TypeError ("Undefined type: "++show tp) pos] getValidTypeQualifiedName tp
   validTypeTermE <- getValidTypeTerm term

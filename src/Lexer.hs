@@ -157,6 +157,8 @@ keywords =
   try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" 
    <|> keyword "return" <|> keyword "package" <|> keyword "import" <|> keyword "abstract")
 
+ignoreKeywords = skipMany $ try (keyword "public" <|> keyword "protected" <|> keyword "private") >> spaces
+
 keyword kw = do
   p <- getPosition
   k <- try (do {k' <- string kw; notFollowedBy $ oneOf javaAlphaNum; return k' })
@@ -189,7 +191,7 @@ token = choice
     ]
 
 tokens :: Parser [TokenPos]
-tokens = (spaces >> comments) *> many (token <* (spaces >> comments))
+tokens = (spaces >> comments >> ignoreKeywords) *> many (token <* (spaces >> comments >> ignoreKeywords))
 
 tokenizeFromFile :: FilePath -> IO (Either ParseError [TokenPos])
 tokenizeFromFile fp = E.catch 

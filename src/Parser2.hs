@@ -63,7 +63,7 @@ data Value = Variable SourcePos P.SimpleName
            | IntegerLit SourcePos Int32
            | StringLit SourcePos String
            | BooleanLit SourcePos Bool
-           | ObjectCreation SourcePos ReferenceType [Term]
+           | ObjectCreation SourcePos ReferenceType [Term] [TypeArgument]
            deriving Show
 
 data ApplicationTarget = ApplicationTargetTerm Term
@@ -104,7 +104,7 @@ getTermPosition (Value (Variable pos _)) = pos
 getTermPosition (Value (IntegerLit pos _)) = pos
 getTermPosition (Value (StringLit pos _)) = pos
 getTermPosition (Value (BooleanLit pos _)) = pos
-getTermPosition (Value (ObjectCreation pos _ _)) = pos
+getTermPosition (Value (ObjectCreation pos _ _ _)) = pos
 getTermPosition (Cast (ClassType pos _ _) _) = pos
 getTermPosition (Cast (TypeVariable pos _) _) = pos
 getTermPosition (Application (ApplicationTargetTerm t) _) = getTermPosition t
@@ -450,11 +450,12 @@ objectCreationTerm = do
   TermState {..} <- getState
   pos <- getPosition
   satisfyKeyword "new"
+  constructorTypeArgs <- parseTypeArguments
   tpName <- parseReferenceType
   P.satisfy LParens
   arguments <- argumentList
   P.satisfy RParens
-  return (Value (ObjectCreation pos tpName arguments))
+  return (Value (ObjectCreation pos tpName arguments constructorTypeArgs))
 
 variableThis :: (Stream s Identity (Token, SourcePos)) => Parsec s TermState Term
 variableThis = do

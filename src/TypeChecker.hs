@@ -114,7 +114,11 @@ data TypedValue = TypedVariable {vPosition :: Word8, vTyp :: Type}
                 | TypedIntegerLiteral {iValue :: Int32 }
                 | TypedStringLiteral {sValue :: String }
                 | TypedBooleanLiteral {bValue :: Bool }
-                | TypedObjectCreation {ocTyp :: TypeCheckerClassReferenceTypeWrapper, ocParamTyps :: [Type], ocTerms :: [TypedTerm]}
+                | TypedObjectCreation { ocTyp :: TypeCheckerClassReferenceTypeWrapper
+                                      , ocArgumentTypes :: [Type]
+                                      , ocArgumentTerms :: [TypedTerm]
+                                      , ocErasedArgumentType :: [Type]
+                                      }
                 deriving Show
 
 data TypedTerm = TypedValue TypedValue
@@ -149,7 +153,7 @@ getValidTypeTermPosition (ValidTypeValue (ValidTypeVariable pos _)) = pos
 getValidTypeTermPosition (ValidTypeValue (ValidTypeIntegerLit pos _)) = pos
 getValidTypeTermPosition (ValidTypeValue (ValidTypeStringLit pos _)) = pos
 getValidTypeTermPosition (ValidTypeValue (ValidTypeBooleanLit pos _)) = pos
-getValidTypeTermPosition (ValidTypeValue (ValidTypeObjectCreation pos _ _)) = pos
+getValidTypeTermPosition (ValidTypeValue (ValidTypeObjectCreation pos _ _ _)) = pos
 getValidTypeTermPosition (ValidTypeCast (ValidTypeRefTypeDeclaration pos _) _) = pos
 getValidTypeTermPosition (ValidTypeApplication (ValidTypeApplicationTargetTerm t) _) = getValidTypeTermPosition t
 getValidTypeTermPosition (ValidTypeApplication (ValidTypeApplicationTargetTypeName (ValidTypeTypeName pos _)) _) = pos
@@ -220,22 +224,24 @@ typeCheck' = do
             Left typeErrors -> return $ Left typeErrors
             Right typedClazzs -> return $ Right typedClazzs
 
-typeCheckValidTypes :: StateT ValidTypeClassData IO (V.Validation [TypeError] [()])
+typeCheckValidTypes :: StateT ValidTypeClassData IO (V.Validation [TypeError] ())
 typeCheckValidTypes = do
-  sequenceA <$> sequenceA
-    [checkForDuplicateTypeErrors
-    ,checkForClassInheritenceCycles
-    ,checkForAbstractClassSubClassErrors
-    ,checkForNonReturnTypeSubstitutableOverrides
-    ,checkForConstructorsUnassignedFieldErrors
-    ,checkForInvalidParameterizedTypeTypeArguments
-    ]
+  e1 <- checkForDuplicateTypeErrors
+  e2 <- checkForClassInheritenceCycles
+  e3 <-checkForInvalidParameterizedTypeTypeArguments
+  let grp1 = e1 *> e2 *> e3
+  case grp1 of
+    V.Failure errors -> return $ V.Failure errors
+    V.Success _ -> do
+      e4 <- checkForAbstractClassSubClassErrors
+      e5 <- checkForNonReturnTypeSubstitutableOverrides
+      e6 <- checkForConstructorsUnassignedFieldErrors
+      return $ e4 *> e5 *> e6
 
 transformToTyped :: StateT ValidTypeClassData IO (Either [TypeError] [TypedClazz])
 transformToTyped = do
   typeData@(_,classMap) <- get
   clazzList <- foldM (\list cls -> (list ++) <$> fmap (: []) (V.toEither <$> getTypedClazz cls)) [] classMap
-  --lift $ print ("clazzList: "++show clazzList)
   let (typeErrors, typedClazzs) = Either.partitionEithers clazzList
   if not (null typeErrors)
     then return $ Left (concat typeErrors)
@@ -251,16 +257,14 @@ checkForDuplicateTypeErrors = do
 
 checkForInvalidParameterizedTypeTypeArguments :: StateT ValidTypeClassData IO (V.Validation [TypeError] ())
 checkForInvalidParameterizedTypeTypeArguments = do
-  typeData@(_,classMap) <- get
-  errors <- foldM (\list cls ->
-    flip (++) list <$> AP.liftA2 (++)
-      (getFieldInvalidParameterizedTypeTypeArguments cls)
-      (getMethodInvalidParameterizedTypeTypeArguments cls))
-    []
+  (_,classMap) <- get
+  foldM (\list cls -> do
+      e1 <- getParentInvalidParameterizedTypeTypeArguments cls
+      e2 <- getFieldInvalidParameterizedTypeTypeArguments cls
+      e3 <- getMethodInvalidParameterizedTypeTypeArguments cls
+      return $ list *> e1 *> e2 *> e3)
+    (pure ())
     classMap
-  return $ case errors of
-    [] -> V.Success ()
-    _ -> V.Failure errors
 
 checkForClassInheritenceCycles :: StateT ValidTypeClassData IO (V.Validation [TypeError] ())
 checkForClassInheritenceCycles = checkForErrors getClassInheritenceCycleErrors
@@ -298,26 +302,36 @@ getType (ValidTypeValue (ValidTypeStringLit pos s)) = do
 getType (ValidTypeValue (ValidTypeBooleanLit pos b)) = do
   return $ V.Success $ TypedValue (TypedBooleanLiteral {bValue=b})
 
-getType (ValidTypeValue (ValidTypeObjectCreation pos tp@(TypeCheckerClassReferenceTypeWrapper _ maybeTypeArgs) arguments)) = do
+getType (ValidTypeValue (ValidTypeObjectCreation pos tp@(TypeCheckerClassReferenceTypeWrapper _ maybeTypeArgs) arguments constructorTypeArgs)) = do
   cond <- lift $ isConcreteClass tp
   if not cond
     then return $ V.Failure [TypeError ("Illegal creation of abstract type: "++show tp) pos]
     else do
       typeData <- lift get
-      createClassTi <- lift $ getClassTypeInfo tp
+      (TypeInfo ti) <- lift $ getClassTypeInfo tp
       invalidTypeArgsV <- lift $ getInvalidParameterizedTypeTypeArguments pos (TypeCheckerJavaReferenceType (TypeCheckerClassRefType tp))
       argumentTermsV <- sequenceA <$> mapM getType arguments
       typedValueV <- case V.toEither argumentTermsV of
         Left errors -> return $ V.Failure errors
         Right argumentTerms -> do
-          let signature = MethodSignature init' (fmap getTypedTermType argumentTerms)
-          eitherMethodInvocationExists <- lift $ getMethodDeclaration tp signature []
+          let paramaterizedTypeEnvMap = case maybeTypeArgs of
+                Nothing -> Map.empty
+                Just typeArgs -> buildTypeParamEnvironment (getTypeParameters ti) typeArgs
+          eitherMethodInvocationExists <- lift $ getConstructorDeclaration tp (fmap getTypedTermType argumentTerms) constructorTypeArgs
           case eitherMethodInvocationExists of
             Left errStr -> return $ V.Failure [TypeError errStr pos]
-            Right (MethodDeclaration m) -> return $ 
-              (TypedValue <$> 
-                (TypedObjectCreation tp (getMethodParams m) <$> 
-                  argumentTermsV))
+            Right methodDeclaration@(MethodDeclaration m) -> do
+              argumentTypes <- lift $ getSignatureWithResolvedTypeParams (getTypeName ti) paramaterizedTypeEnvMap constructorTypeArgs methodDeclaration
+              erasedArgumentTypes <- lift $ getSignatureWithErasedTypeParams (getTypeName ti) paramaterizedTypeEnvMap constructorTypeArgs methodDeclaration
+              argumentTermsNarrowCastIfNecessary <- lift $
+                zipWithM addNarrowingCast argumentTerms argumentTypes
+              return $ V.Success $
+                TypedValue 
+                  (TypedObjectCreation { ocTyp=tp
+                                       , ocArgumentTypes=argumentTypes
+                                       , ocErasedArgumentType=erasedArgumentTypes
+                                       , ocArgumentTerms=argumentTermsNarrowCastIfNecessary
+                                       })
       return $ typedValueV <* invalidTypeArgsV
 
 getType (ValidTypeCast (ValidTypeRefTypeDeclaration pos tp) t) = do
@@ -573,20 +587,20 @@ getDuplicateFields ValidTypeClazz {..} =
     (Map.empty, [])
     vcFields
 
-getFieldInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT ValidTypeClassData IO [TypeError]
-getFieldInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
-  typeArgsV <-
-    foldM
-      (\errorList field@ValidTypeField{..} -> do
-        maybeError <- getInvalidParameterizedTypeTypeArguments (snd vfName) vfType
-        return $ errorList <* maybeError)
-      (pure ())
-      vcFields
-  case V.toEither typeArgsV of
-    Left errors -> return errors
-    Right _ -> return []
+getParentInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] ())
+getParentInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
+  getInvalidParameterizedTypeTypeArguments (snd vcParent) (TypeCheckerJavaReferenceType (TypeCheckerClassRefType (fst vcParent)))
 
-getMethodInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT ValidTypeClassData IO [TypeError]
+getFieldInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] ())
+getFieldInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
+  foldM
+    (\errorList field@ValidTypeField{..} -> do
+      maybeError <- getInvalidParameterizedTypeTypeArguments (snd vfName) vfType
+      return $ errorList <* maybeError)
+    (pure ())
+    vcFields
+
+getMethodInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] ())
 getMethodInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
   returnTypeErrors <- foldM
     (\errorList method@ValidTypeMethod{..} -> do
@@ -594,7 +608,7 @@ getMethodInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
       return $ errorList <* maybeError)
     (pure ())
     vcMethods
-  allTypeErrorsV <- foldM
+  foldM
     (\errorList method@ValidTypeMethod{..}  -> do
       newErrors <- foldM
         (\paramErrorList (ValidTypeParameter paramName paramType) -> do
@@ -605,23 +619,58 @@ getMethodInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
       return $ errorList <* newErrors)
     returnTypeErrors
     vcMethods
-  case V.toEither allTypeErrorsV of
-    Left errors -> return errors
-    Right _ -> return []
 
 getInvalidParameterizedTypeTypeArguments :: SourcePos ->
   TypeCheckerJavaType ->
   StateT ValidTypeClassData IO (V.Validation [TypeError] ())
 getInvalidParameterizedTypeTypeArguments pos (TypeCheckerJavaReferenceType (TypeCheckerClassRefType crtw)) = do
   (TypeInfo ti) <- getClassTypeInfo' (getTypeCheckerClassReferenceTypeClassName crtw)
+  let typeArgs = getTypeCheckerClassReferenceTypeTypeArguments crtw
   if null (getTypeParameters ti)
-    then if not (null (getTypeCheckerClassReferenceTypeTypeArguments crtw))
+    then if not (null typeArgs)
       then return $ V.Failure [TypeError ("type "++show (getTypeName ti)++" does not take parameters") pos]
       else return $ V.Success ()
-    else if length (getTypeParameters ti) /= length (getTypeCheckerClassReferenceTypeTypeArguments crtw)
+    else if length (getTypeParameters ti) /= length typeArgs
       then return $ V.Failure [TypeError ("wrong number of type arguments; required "++show (length (getTypeParameters ti))) pos]
-      else return $ V.Success ()
+      else do
+        foldM 
+          (\errorList paramArgPair -> do 
+            newErrors <- isTypeArgumentWithinTypeParameterBounds pos paramArgPair
+            return $ errorList <* newErrors) 
+          (pure ())
+          (zip (getTypeParameters ti) (VT.toList typeArgs))
 getInvalidParameterizedTypeTypeArguments pos _ = return $ V.Success ()
+
+isTypeArgumentWithinTypeParameterBounds :: SourcePos -> (TypeCheckerTypeParameter, TypeCheckerTypeArgument) -> StateT ValidTypeClassData IO (V.Validation [TypeError] ())
+isTypeArgumentWithinTypeParameterBounds
+  pos (
+    TypeCheckerTypeParameter
+      pname
+        (Just (TypeCheckerClassTypeTypeBound boundClass boundInterfaces)),
+    TypeCheckerTypeArgument _ argRtw) = do
+  classBoundError <- ifM (isSubtypeOf argRtw (TypeCheckerClassRefType boundClass))
+    (return $ V.Success ())
+    (return $ V.Failure [TypeError ("type argument "++show argRtw++" is not within bounds of type varialbe "++show pname) pos])
+  interfaceBoundErrors <- foldM 
+    (\errorList interfaceBound ->
+      ifM (isSubtypeOf argRtw (TypeCheckerClassRefType interfaceBound))
+        (return $ V.Success())
+        (return $ V.Failure [TypeError ("type argument "++show argRtw++" is not within bounds of type varialbe "++show pname) pos]))
+    (pure ())
+    boundInterfaces
+  return $ classBoundError <* interfaceBoundErrors
+isTypeArgumentWithinTypeParameterBounds
+  pos (
+    TypeCheckerTypeParameter
+      pname
+      (Just (TypeCheckerTypeVariableTypeBound _)),
+    TypeCheckerTypeArgument _ argRtw) = undefined
+isTypeArgumentWithinTypeParameterBounds
+  pos (
+    TypeCheckerTypeParameter
+      pname
+        Nothing,
+    TypeCheckerTypeArgument _ argRtw) = undefined
 
 getDuplicateMethods :: ValidTypeClazz -> [TypeError]
 getDuplicateMethods ValidTypeClazz {..} =
@@ -827,8 +876,9 @@ isMethodOverrideNotReturnTypeSubstitutable superClassMethods method@ValidTypeMet
   let possibleOverrideList = filter (\(_,methodSig,_) -> sig == methodSig) superClassMethods
   case possibleOverrideList of
     [] -> return []
-    (MethodDeclarationWithClassName md@(MethodDeclaration m) methodClassVtqnw,_,rt):_ -> do
-      let errorMethod = show methodClassVtqnw++"."++show md
+    (MethodDeclarationWithClassName md@(MethodDeclaration m) methodClassVtqnw,sig,rt):_ -> do
+      let errorMethod = show rt++" "++show sig
+      let errorClass = show methodClassVtqnw
       if not (isTypeSupported rt)
         then return [TypeError "Method override of unsupported primitive return type" pos]
         else
@@ -838,11 +888,11 @@ isMethodOverrideNotReturnTypeSubstitutable superClassMethods method@ValidTypeMet
                 then
                   return []
                 else
-                  (return [TypeError ("cannot override "++errorMethod++" return type is not compatible") pos])
+                  return [TypeError ("cannot override "++errorMethod++" in "++errorClass++" return type is not compatible") pos]
             TypeCheckerJavaReferenceType rtw ->
               ifM (isSubtypeOf rtw (TypeCheckerClassRefType (getBoxedType rt)))
                 (return [])
-                (return [TypeError ("cannot override "++errorMethod++" return type is not compatible") pos])
+                (return [TypeError ("cannot override "++errorMethod++" in "++errorClass++" return type is not compatible") pos])
 
 getAssignmentTypeError :: Environment -> Environment -> ValidTypeAssignment ->
                           (StateT ValidTypeClassData IO) (V.Validation [TypeError] TypedAssignment)
@@ -860,7 +910,7 @@ getAssignmentTypeError lenv renv ValidTypeAssignment {..} = do
         else return $ V.Failure [TypeError ("incompatible types: "++
             show (getTypedTermType rightTermType)++
             " cannot be converted to "++
-            show (getTypedTermType leftTermType)) 
+            show (getTypedTermType leftTermType))
           (getValidTypeTermPosition vaRightHandTerm)]
 
 isTermValidForLeftAssignment :: ValidTypeTerm -> Bool
@@ -956,6 +1006,17 @@ getFieldDeclaration ti@(TypeInfo t) nm = do
           parentType <- getClassTypeInfo (getTypeParent t)
           getFieldDeclaration parentType nm
 
+getConstructorDeclaration :: TypeCheckerClassReferenceTypeWrapper -> [Type] -> [TypeCheckerTypeArgument] -> StateT ValidTypeClassData IO (Either String MethodDeclaration)
+getConstructorDeclaration crtw@(TypeCheckerClassReferenceTypeWrapper vtqnw _) argumentTypes methodTypeArgs= do
+  consList <- getApplicableConstructors crtw argumentTypes methodTypeArgs
+  case consList of
+    [] -> return $ Left ("no suitable constructor found for "++show vtqnw++"("++List.intercalate "," (fmap show argumentTypes)++")")
+    _ -> do
+      result <- getMostSpecificMethod crtw methodTypeArgs consList
+      case result of
+        Nothing -> return $ Left ("reference to "++show vtqnw++" is ambiguous")
+        Just constructor -> return $ Right constructor
+
 {--
 Resolve an appropriate method for a method invocation expression (MethodSignature).
 Logic derived from JLS 15.12
@@ -1015,6 +1076,18 @@ getMostSpecificMethod crtw@(TypeCheckerClassReferenceTypeWrapper vtqnw _) method
       ms <- MethodSignature (getMethodName m') <$> getSignatureWithResolvedTypeParams vtqnw paramaterizedTypeEnvMap methodTypeArgs md'
       isMethodApplicableByLooseInvocation vtqnw paramaterizedTypeEnvMap ms methodTypeArgs md
 
+getApplicableConstructors :: TypeCheckerClassReferenceTypeWrapper -> [Type] -> [TypeCheckerTypeArgument] -> StateT ValidTypeClassData IO [MethodDeclaration]
+getApplicableConstructors crtw@(TypeCheckerClassReferenceTypeWrapper vtqnw maybeTypeArguments) argumentTypes methodTypeArgs = do
+  tiw@(TypeInfo ti) <- getClassTypeInfo crtw
+  let typeParameters = getTypeParameters ti
+  let paramaterizedTypeEnvMap = case maybeTypeArguments of
+        Nothing -> Map.empty
+        Just typeArgs -> buildTypeParamEnvironment typeParameters typeArgs
+  pams <- getPotentiallyApplicableConstructors tiw argumentTypes
+  filterM
+    (isMethodApplicableByLooseInvocation vtqnw paramaterizedTypeEnvMap (MethodSignature init' argumentTypes) methodTypeArgs)
+    pams
+
 getApplicableMethods :: TypeCheckerClassReferenceTypeWrapper -> MethodSignature -> [TypeCheckerTypeArgument] -> StateT ValidTypeClassData IO [MethodDeclaration]
 getApplicableMethods crtw@(TypeCheckerClassReferenceTypeWrapper vtqnw maybeTypeArguments) signature methodTypeArgs = do
   tiw@(TypeInfo ti) <- getClassTypeInfo crtw
@@ -1066,6 +1139,13 @@ isMethodApplicableByLooseInvocation vtqnw classParamaterizedTypeEnvMap signature
     isTypeInvocationCompatible (L baseType) Z = isSubtypeOf (TypeCheckerClassRefType baseType) CP.createValidTypeRefTypeBoolean
     isTypeInvocationCompatible (L baseType) (L vtn) = isSubtypeOf (TypeCheckerClassRefType baseType) (TypeCheckerClassRefType vtn)
     isTypeInvocationCompatible _ _ = return False
+
+getPotentiallyApplicableConstructors :: TypeInfo ->
+                                        [Type] ->
+                                        StateT ValidTypeClassData IO [MethodDeclaration]
+getPotentiallyApplicableConstructors t@(TypeInfo ti) consArguments =
+    getTypePotentiallyApplicableMethods ti (MethodSignature init' consArguments)
+
 {--
 A class or interface (parameter 1) determined by compile-time step 1 (§15.12.1) is searched
 for all member methods that are potentially applicable to method invocation (parameter 2);

@@ -39,6 +39,7 @@ public class Main {
         Assert.assertTrue("containsAll", a.v.containsAll(testList));
         Assert.assertEquals(testList, a.createList(testList.get(0),testList.get(1),testList.get(2)));
         Assert.assertEquals(Integer.valueOf(2), a.getListInt());
+        Assert.assertEquals(Integer.valueOf(4), a.getBoundTestValue());
     }
     static Integer java = 5;
     public static void foo(String[] args) {

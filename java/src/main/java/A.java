@@ -4,6 +4,7 @@ import java.util.Vector;
 import java.util.List;
 import java.util.LinkedList;
 import java.util.TimeZone;
+import test.BoundTest;
 
 class A extends Object {
   String foo;
@@ -14,6 +15,7 @@ class A extends Object {
 
   Vector<Number> v;
   List<Integer> e;
+  BoundTest<Integer> btest;
 
   A() {
     super();
@@ -24,6 +26,7 @@ class A extends Object {
     this.c = 0;
     this.v = new Vector<Number>();
     this.e = new LinkedList<Integer>();
+    this.btest = new BoundTest<Integer>(4);
   }
 
   A(String f) {
@@ -114,6 +117,10 @@ class A extends Object {
   
   Integer getStringFromIntList() {
     return this.getStringFromInt(this.createList(1,2,3).get(0), 12);
+  }
+
+  Integer getBoundTestValue() {
+    return this.btest.getValue();
   }
 
 /**

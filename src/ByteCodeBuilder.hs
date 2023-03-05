@@ -245,13 +245,13 @@ generateTermCode' (TypedValue TypedBooleanLiteral {bValue=value}) = do
   pendingStackMapFrame <- getPossiblePendingStackFrame
   modify (\MethodState {..} -> MethodState {stackTypes=Z : stackTypes,..})
   return ([ConstantByteCodeChunk byteCode pendingStackMapFrame], 1)
-generateTermCode' (TypedValue TypedObjectCreation {ocTyp=vtn@(TypeCheckerClassReferenceTypeWrapper tpVtn _), ocParamTyps=targetParamTypes, ocTerms=terms}) = do
+generateTermCode' (TypedValue TypedObjectCreation {ocTyp=vtn@(TypeCheckerClassReferenceTypeWrapper tpVtn _), ocArgumentTypes=argumentTypes, ocArgumentTerms=argumentTerms, ocErasedArgumentType=erasedArgumentTypes}) = do
   pendingStackMapFrame <- getPossiblePendingStackFrame
   classNdx <- lift $ addClass (getValidTypeQName tpVtn)
-  (constructorTerms, maxStack) <- generateTermListCode (zip targetParamTypes terms)
+  (constructorTerms, maxStack) <- generateTermListCode (zip argumentTypes argumentTerms)
   pendingParametersStackMapFrame <- getPossiblePendingStackFrame
-  modify (\MethodState {..} -> MethodState {stackTypes=drop (length targetParamTypes) stackTypes,..})
-  constructorMethodRef <- lift $ addMethodRef (getValidTypeQName tpVtn) P.createNameInit (fmap getTypedTermType terms) "V"
+  modify (\MethodState {..} -> MethodState {stackTypes=drop (length argumentTypes) stackTypes,..})
+  constructorMethodRef <- lift $ addMethodRef (getValidTypeQName tpVtn) P.createNameInit erasedArgumentTypes "V"
   let byteCode = [ConstantByteCodeChunk (toLazyByteString (word8 0xb7 <> word16BE constructorMethodRef)) pendingParametersStackMapFrame]++
                  constructorTerms++
                  [ConstantByteCodeChunk (toLazyByteString (word8 0xbb <> word16BE classNdx <> word8 0x59)) pendingStackMapFrame]

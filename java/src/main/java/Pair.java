@@ -70,21 +70,3 @@ class AbstractImpl extends AbstractTest {
     return 5;
   }
 }
-
-class FunnyList extends java.util.AbstractSequentialList<String> {
-
-  java.util.List<String> l;
-
-  FunnyList() {
-    super();
-    this.l = new java.util.LinkedList<String>();
-  }
-
-  java.util.ListIterator<String> listIterator(int index) {
-    return this.l.listIterator();
-  }
-
-  int size() {
-    return 0;
-  }
-}
