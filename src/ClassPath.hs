@@ -79,7 +79,7 @@ import TextShow (TextShow(showt),showb,toText )
 import Debug.Trace (trace, traceStack)
 import Control.Monad.Trans.State.Strict (StateT,get,put,evalStateT)
 import Control.Monad.Extra (join)
-import Text.Parsec ( anyChar, char, manyTill, (<|>), oneOf, lookAhead, optionMaybe, char, many1, many, spaces, runParser, Parsec )
+import Text.Parsec ( anyChar, char, manyTill, (<|>), oneOf, lookAhead, optionMaybe, char, many1, many, spaces, runParser, try, Parsec )
 import Data.Bits ( Bits(bit) )
 import qualified Data.FlagSet as FS
 import TypeCheckerTypes
@@ -469,16 +469,18 @@ parseTypeParameters = do
 parseTypeParameter = do
   identifier <- parseIdentifier
   char ':'
-  classBound <- parseReferenceTypeSignature
+  maybeClassBound <- optionMaybe $ try parseReferenceTypeSignature
   interfaceBounds <- many (char ':' >> parseReferenceTypeSignature)
   let interfaceBounds' = fmap mapInterfaceBoundRefType interfaceBounds
-  let bound = case classBound of
-        TypeCheckerClassRefType tccrtw ->
-          TypeCheckerClassTypeTypeBound
-            tccrtw
-            (S.fromList interfaceBounds')
-        TypeCheckerTypeVariableRefType sn -> TypeCheckerTypeVariableTypeBound sn
-        TypeCheckerArrayRefType jts -> undefined
+  let bound = case maybeClassBound of
+        Nothing -> TypeCheckerClassTypeTypeBound createValidTypeClassTypeObject S.empty
+        Just classBound -> case classBound of
+            TypeCheckerClassRefType tccrtw ->
+              TypeCheckerClassTypeTypeBound
+                tccrtw
+                (S.fromList interfaceBounds')
+            TypeCheckerTypeVariableRefType sn -> TypeCheckerTypeVariableTypeBound sn
+            TypeCheckerArrayRefType jts -> undefined
   return $ TypeCheckerTypeParameter identifier (Just bound)
 
 mapInterfaceBoundRefType :: TypeCheckerReferenceTypeWrapper -> TypeCheckerClassReferenceTypeWrapper
@@ -824,7 +826,7 @@ createClassDescriptor classFile@ClassFile {..} =
       accessFlags = FS.Cons access_flags
       name = classPathValidTypeName (constructQualifiedName $ getUtf8FromConstantPool classFile (ci_name_index classInfo))
       maybeClassSignatureText = getSignature classFile attributes_info
-      {--!x = trace (show $ runParser parseClassSignature () "" . T.unpack <$> maybeClassSignatureText) 1--}
+      -- !x = trace (show (runParser parseClassSignature () "" . T.unpack <$> maybeClassSignatureText)++" - "++show (T.unpack <$> maybeClassSignatureText)) 1
       maybeClassSignature = E.fromRight undefined . runParser parseClassSignature () "" . T.unpack <$> maybeClassSignatureText
       typeParameters = case maybeClassSignature of
         Nothing -> V.empty

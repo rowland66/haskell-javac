@@ -6,6 +6,12 @@ module ByteCodeBuilder
 
 import qualified Data.ByteString.Lazy as B
 import Data.ByteString.Builder
+    ( toLazyByteString,
+      word16BE,
+      word32BE,
+      word8,
+      lazyByteString,
+      Builder )
 import Control.Monad.Trans.State
 import Control.Monad (foldM)
 import Data.Int
@@ -23,8 +29,9 @@ import Control.Monad.Trans.Class (lift)
 import StackMapBuilder
 import TypeCheckerTypes
 import TypeValidator
-import TypeInfo (Type(..),eraseParameterizedType,getErasedType, getClassTypeInfo', getErasedMethodSignature, isTypeParameterized, convertTypeCheckerJavaType)
+import TypeInfo (Type(..),eraseParameterizedType,getErasedType, getClassTypeInfo', isTypeParameterized, convertTypeCheckerJavaType, getErasedTypeName)
 import qualified ClassPath as CP
+import qualified Control.Applicative as Builder
 
 ireturn = 0xac
 areturn = 0xb0 :: Word8
@@ -38,7 +45,7 @@ data MethodState = MethodState { initialStackMapFrame :: StackMapFrame
 type MethodST = StateT MethodState ConstantPoolST
 
 newMethodState :: TypeCheckerValidTypeQualifiedNameWrapper -> [ValidTypeParameter] -> MethodState
-newMethodState className params = 
+newMethodState className params =
   let sf = startingStackFrame (L (TypeCheckerClassReferenceTypeWrapper className Nothing)) params
     in
       MethodState { initialStackMapFrame = sf
@@ -49,8 +56,10 @@ newMethodState className params =
 data ClassByteCode = ClassByteCode { accessFlags :: Word16
                                    , classNdx :: Word16
                                    , superNdx :: Word16
+                                   , interfacesNdx :: [Word16]
                                    , fields :: [B.ByteString]
                                    , methods :: [B.ByteString]
+                                   , attributes :: [B.ByteString]
                                    }
 
 buildClass :: TypedClazz -> B.ByteString
@@ -62,20 +71,51 @@ buildClass clazz =
            , toLazyByteString (word16BE accessFlags)
            , toLazyByteString (word16BE classNdx)
            , toLazyByteString (word16BE superNdx)
-           , toLazyByteString (word16BE 0x0000)
+           , toLazyByteString (word16BE (fromIntegral (length interfacesNdx) :: Word16))
+           , toLazyByteString $ foldr ((<>) . word16BE) (mempty :: Builder) interfacesNdx
            , toLazyByteString (word16BE (fromIntegral (length fields) :: Word16))
            , B.concat fields
            , toLazyByteString (word16BE (fromIntegral (length methods) :: Word16))
            , B.concat methods
-           , toLazyByteString (word16BE 0x0000)]
+           , toLazyByteString (word16BE (fromIntegral (length attributes) :: Word16))
+           , if null attributes then B.empty else foldl' (<>) B.empty attributes]
 
 buildClass' :: TypedClazz -> ConstantPoolST ClassByteCode
-buildClass' clazz@(NewTypedClazz accessFlags nameVtn parentVtn fields methods) = do
-  clazzNdx <- addClass (getValidTypeQName nameVtn)
-  parentNdx <- addClass (getValidTypeQName parentVtn)
-  fieldsInfo <- mapM buildFieldInfo fields
-  methodsInfo <- mapM (buildMethodInfo nameVtn) methods
-  return $ ClassByteCode {accessFlags=accessFlagWord accessFlags, classNdx=clazzNdx, superNdx=parentNdx, fields=fieldsInfo, methods=methodsInfo}
+buildClass' clazz@NewTypedClazz{..} = do
+  clazzNdx <- addClass (getValidTypeQName ntcClassName)
+  parentNdx <- addClass (getValidTypeQName (getErasedTypeName ntcParentClassRef))
+  interfacesNdx <- mapM (addClass . getValidTypeQName . getErasedTypeName) ntcInterfaceClassRefs
+  fieldsInfo <- mapM buildFieldInfo ntcFields
+  methodsInfo <- mapM (buildMethodInfo ntcClassName) ntcMethods
+  let isParentParameterized = isTypeParameterized (L ntcParentClassRef)
+      isInterfaceParameterized = foldl' (\accum i -> if accum then accum else (isTypeParameterized (L i))) False ntcInterfaceClassRefs
+      signature =
+        if isParentParameterized || isInterfaceParameterized
+          then
+            Just (show (L ntcParentClassRef)++
+              foldl'
+                (\str i -> str++show (L i))
+                ""
+                ntcInterfaceClassRefs)
+          else
+            Nothing
+  sigAttributes <-
+        case signature of
+          Nothing -> return []
+          Just signature -> do
+            attributeNameNdx <- addUtf8 "Signature"
+            signatureNdx <- addUtf8 signature
+            return $ [toLazyByteString $ word16BE attributeNameNdx <> word32BE 0x00000002 <> word16BE signatureNdx]
+
+
+  return $ ClassByteCode { accessFlags=accessFlagWord ntcAccessFlags
+                         , classNdx=clazzNdx
+                         , superNdx=parentNdx
+                         , interfacesNdx=interfacesNdx
+                         , fields=fieldsInfo
+                         , methods=methodsInfo
+                         , attributes = sigAttributes
+                         }
 
 classHeader :: B.ByteString
 classHeader = toLazyByteString (word32BE 0xCAFEBABE <> word16BE 0x0000 <> word16BE 0x0037)
@@ -85,14 +125,14 @@ buildFieldInfo ValidTypeField {..} = do
   let (name,_) = vfName
   nameNdx <- addUtf8 (show name)
   descriptorNdx <- addUtf8 (show (eraseParameterizedType vfType))
-  let signature = 
+  let maybeSignature =
         if isTypeParameterized (convertTypeCheckerJavaType vfType)
           then
             Just (show vfType)
           else
             Nothing
-  attributes <- 
-        case signature of
+  attributes <-
+        case maybeSignature of
           Nothing -> return $ word16BE 0x0000
           Just signature -> do
             attributeNameNdx <- addUtf8 "Signature"
@@ -111,30 +151,30 @@ buildMethodInfo className method@(NewTypedMethod name params tp maybeMethodImpl)
         Just _ -> word16BE 0x0001
   (codeAttrInfo,methodState) <- runStateT (buildMethodCodeAttrInfo method) (newMethodState className params)
   let isReturnTypeParameterized = isTypeParameterized (convertTypeCheckerJavaType tp)
-      areParamTypesParameterized = foldl' 
-        (\accum ValidTypeParameter {..} -> if accum then accum else isTypeParameterized (convertTypeCheckerJavaType vpType)) 
-        False 
+      areParamTypesParameterized = foldl'
+        (\accum ValidTypeParameter {..} -> if accum then accum else isTypeParameterized (convertTypeCheckerJavaType vpType))
+        False
         params
-      signature = 
+      maybeSignature =
         if isReturnTypeParameterized || areParamTypesParameterized
           then
             Just ("("++
-              foldl' 
-                (\str ValidTypeParameter {..} -> str++show (convertTypeCheckerJavaType vpType)) 
-                "" 
+              foldl'
+                (\str ValidTypeParameter {..} -> str++show (convertTypeCheckerJavaType vpType))
+                ""
                 params++
               ")"++show (convertTypeCheckerJavaType tp))
           else
             Nothing
-  sigAttribute <- 
-        case signature of
-          Nothing -> return $ mempty
+  sigAttribute <-
+        case maybeSignature of
+          Nothing -> return mempty
           Just signature -> do
             attributeNameNdx <- addUtf8 "Signature"
             signatureNdx <- addUtf8 signature
             return $ word16BE attributeNameNdx <> word32BE 0x00000002 <> word16BE signatureNdx
   let attributeCount = (case maybeMethodImpl of Just _ -> 1; Nothing -> 0) +
-                       (case signature of Just _ -> 1; Nothing -> 0)
+                       (case maybeSignature of Just _ -> 1; Nothing -> 0)
   return $ toLazyByteString (
     accessFlagsBuilder <>
     word16BE nameNdx <>
@@ -148,7 +188,7 @@ buildMethodCodeAttrInfo (NewTypedMethod _ params returnType (Just (TypedMethodIm
   (byteCodeChunks, maxStack) <- generateTermCode term
   boxCodeByteChunks <- generateTermConversionByteCode term (convertTypeCheckerJavaType returnType)
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  let returnCodeByteChunk = case returnType of 
+  let returnCodeByteChunk = case returnType of
         (TypeCheckerJavaPrimitiveType _) -> ConstantByteCodeChunk (B.singleton ireturn) pendingStackMapFrame
         (TypeCheckerJavaReferenceType _) -> ConstantByteCodeChunk (B.singleton areturn) pendingStackMapFrame
   let completeByteCodeChunks = returnCodeByteChunk:boxCodeByteChunks++byteCodeChunks
@@ -179,7 +219,7 @@ buildCodeAttrInfo maxStack paramsCount codeBytes stackMapBytesList = do
   let codeBytesLength = (fromIntegral (B.length codeBytes) :: Word32)
   let stackMapAttributeLength = (fromIntegral (B.length stackMapTableAttribute) :: Word32)
   let codeAttributeInfoLength =  codeBytesLength + stackMapAttributeLength + 12
-  return $ 
+  return $
     word16BE nameNdx <>
     word32BE codeAttributeInfoLength <>
     word16BE maxStack <>
@@ -193,12 +233,12 @@ generateAssignmentCode :: TypedAssignment -> MethodST ([ByteCodeChunk], Word16)
 generateAssignmentCode (NewTypedAssignment lhTerm rhTerm) = generateAssignmentCode' lhTerm rhTerm
 
 generateAssignmentCode' :: TypedTerm -> TypedTerm -> MethodST ([ByteCodeChunk], Word16)
-generateAssignmentCode' (TypedApplication 
-                          (TypedReferenceTerm 
-                            (TypeCheckerClassRefType 
-                              (TypeCheckerClassReferenceTypeWrapper typedReferenceTermVtn _)) 
-                              t) 
-                            TypedFieldAccess {fName=field, fTyp=tp}) 
+generateAssignmentCode' (TypedApplication
+                          (TypedReferenceTerm
+                            (TypeCheckerClassRefType
+                              (TypeCheckerClassReferenceTypeWrapper typedReferenceTermVtn _))
+                              t)
+                            TypedFieldAccess {fName=field, fTyp=tp})
                         rhTerm = do
   (lhByteCode, lhMaxStack) <- generateTermCode t
   (rhByteCode, rhMaxStack) <- generateTermCode rhTerm
@@ -286,21 +326,21 @@ generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerClassRefType
   return (byteCode, max termMaxStack (argumentListMaxStack+1))
 generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerTypeVariableRefType _) term) TypedMethodInvocation {..}) = undefined
 generateTermCode' (TypedApplication (TypedReferenceTerm (TypeCheckerArrayRefType _) term) TypedMethodInvocation {..}) = undefined
-generateTermCode' 
-  (TypedApplication 
-    (TypedReferenceTerm 
-      (TypeCheckerClassRefType 
-        (TypeCheckerClassReferenceTypeWrapper termTypeVtn typeArgs)) 
-      term) 
+generateTermCode'
+  (TypedApplication
+    (TypedReferenceTerm
+      (TypeCheckerClassRefType
+        (TypeCheckerClassReferenceTypeWrapper termTypeVtn typeArgs))
+      term)
     TypedInterfaceMethodInvocation {..}) = do
   (methodInvocationTermByteCode, termMaxStack) <- generateTermCode' term
   (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip iArgumentTyps iArgumentTerms)
   interfaceMethodRef <- lift $ addInterfaceMethodRef (getValidTypeQName termTypeVtn) iName iErasedArgumentTypes (show iErasedType)
   pendingStackMapFrame <- getPossiblePendingStackFrame
   let byteCode = [ConstantByteCodeChunk
-                   (toLazyByteString (word8 0xb9 <> 
-                      word16BE interfaceMethodRef <> 
-                      word8 (fromIntegral (length iArgumentTyps+1) :: Word8) <> 
+                   (toLazyByteString (word8 0xb9 <>
+                      word16BE interfaceMethodRef <>
+                      word8 (fromIntegral (length iArgumentTyps+1) :: Word8) <>
                       word8 0))
                    pendingStackMapFrame]++
                  methodInvocationTerms++
@@ -337,10 +377,10 @@ generateTermCode' (TypedStaticApplication (TypedTypeName tnQnVtn) TypedStaticInt
   (methodInvocationTerms, argumentListMaxStack) <- generateTermListCode (zip tiArgumentTyps tiArguments)
   interfaceMethodRef <- lift $ addInterfaceMethodRef (getValidTypeQName tnQnVtn) tiName tiErasedArgumentTypes (show tiErasedType)
   pendingStackMapFrame <- getPossiblePendingStackFrame
-  let byteCode = ConstantByteCodeChunk 
-                  (toLazyByteString 
-                    (word8 0xb8 <> 
-                    word16BE interfaceMethodRef)) 
+  let byteCode = ConstantByteCodeChunk
+                  (toLazyByteString
+                    (word8 0xb8 <>
+                    word16BE interfaceMethodRef))
                   pendingStackMapFrame:methodInvocationTerms
   modify (\MethodState {..} -> MethodState {stackTypes=tiErasedType:drop (length tiArgumentTyps) stackTypes,..})
   return (byteCode, max 1 argumentListMaxStack)

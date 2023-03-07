@@ -155,7 +155,7 @@ primitiveType = do
 
 keywords =
   try (keyword "class" <|> keyword "extends" <|> keyword "new" <|> keyword "super" <|> keyword "this" 
-   <|> keyword "return" <|> keyword "package" <|> keyword "import" <|> keyword "abstract")
+   <|> keyword "return" <|> keyword "package" <|> keyword "import" <|> keyword "abstract") <|> keyword "implements"
 
 ignoreKeywords = skipMany $ try (keyword "public" <|> keyword "protected" <|> keyword "private") >> spaces
 

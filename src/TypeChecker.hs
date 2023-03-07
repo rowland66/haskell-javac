@@ -139,8 +139,13 @@ data TypedAssignment = NewTypedAssignment TypedTerm TypedTerm deriving Show
 data TypedMethod = NewTypedMethod P.SimpleName [ValidTypeParameter] TypeCheckerJavaType (Maybe TypedMethodImplementation)
                  deriving Show
 
-data TypedClazz = NewTypedClazz [P.ClassAccessFlag] TypeCheckerValidTypeQualifiedNameWrapper TypeCheckerValidTypeQualifiedNameWrapper [ValidTypeField] [TypedMethod]
-                deriving Show
+data TypedClazz = NewTypedClazz { ntcAccessFlags :: [P.ClassAccessFlag]
+                                , ntcClassName :: TypeCheckerValidTypeQualifiedNameWrapper
+                                , ntcParentClassRef :: TypeCheckerClassReferenceTypeWrapper
+                                , ntcInterfaceClassRefs :: [TypeCheckerClassReferenceTypeWrapper]
+                                , ntcFields :: [ValidTypeField]
+                                , ntcMethods :: [TypedMethod]
+                                } deriving Show
 
 data TypedMethodImplementation = TypedMethodImpl TypedTerm
                                | TypedConstructorImpl TypedConstructorInvocation [TypedAssignment]
@@ -260,9 +265,10 @@ checkForInvalidParameterizedTypeTypeArguments = do
   (_,classMap) <- get
   foldM (\list cls -> do
       e1 <- getParentInvalidParameterizedTypeTypeArguments cls
-      e2 <- getFieldInvalidParameterizedTypeTypeArguments cls
-      e3 <- getMethodInvalidParameterizedTypeTypeArguments cls
-      return $ list *> e1 *> e2 *> e3)
+      e2 <- getInterfaceInvalidParameterizedTypeTypeArguents cls
+      e3 <- getFieldInvalidParameterizedTypeTypeArguments cls
+      e4 <- getMethodInvalidParameterizedTypeTypeArguments cls
+      return $ list *> e1 *> e2 *> e3 *> e4)
     (pure ())
     classMap
 
@@ -326,7 +332,7 @@ getType (ValidTypeValue (ValidTypeObjectCreation pos tp@(TypeCheckerClassReferen
               argumentTermsNarrowCastIfNecessary <- lift $
                 zipWithM addNarrowingCast argumentTerms argumentTypes
               return $ V.Success $
-                TypedValue 
+                TypedValue
                   (TypedObjectCreation { ocTyp=tp
                                        , ocArgumentTypes=argumentTypes
                                        , ocErasedArgumentType=erasedArgumentTypes
@@ -591,6 +597,14 @@ getParentInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT Valid
 getParentInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
   getInvalidParameterizedTypeTypeArguments (snd vcParent) (TypeCheckerJavaReferenceType (TypeCheckerClassRefType (fst vcParent)))
 
+getInterfaceInvalidParameterizedTypeTypeArguents :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] ())
+getInterfaceInvalidParameterizedTypeTypeArguents ValidTypeClazz{..} = do
+  foldM
+    (\errorList interface ->
+      getInvalidParameterizedTypeTypeArguments (snd vcParent) (TypeCheckerJavaReferenceType (TypeCheckerClassRefType (fst interface))))
+    (pure ())
+    vcInterfaces
+
 getFieldInvalidParameterizedTypeTypeArguments :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] ())
 getFieldInvalidParameterizedTypeTypeArguments ValidTypeClazz{..} = do
   foldM
@@ -633,10 +647,10 @@ getInvalidParameterizedTypeTypeArguments pos (TypeCheckerJavaReferenceType (Type
     else if length (getTypeParameters ti) /= length typeArgs
       then return $ V.Failure [TypeError ("wrong number of type arguments; required "++show (length (getTypeParameters ti))) pos]
       else do
-        foldM 
-          (\errorList paramArgPair -> do 
+        foldM
+          (\errorList paramArgPair -> do
             newErrors <- isTypeArgumentWithinTypeParameterBounds pos paramArgPair
-            return $ errorList <* newErrors) 
+            return $ errorList <* newErrors)
           (pure ())
           (zip (getTypeParameters ti) (VT.toList typeArgs))
 getInvalidParameterizedTypeTypeArguments pos _ = return $ V.Success ()
@@ -651,7 +665,7 @@ isTypeArgumentWithinTypeParameterBounds
   classBoundError <- ifM (isSubtypeOf argRtw (TypeCheckerClassRefType boundClass))
     (return $ V.Success ())
     (return $ V.Failure [TypeError ("type argument "++show argRtw++" is not within bounds of type varialbe "++show pname) pos])
-  interfaceBoundErrors <- foldM 
+  interfaceBoundErrors <- foldM
     (\errorList interfaceBound ->
       ifM (isSubtypeOf argRtw (TypeCheckerClassRefType interfaceBound))
         (return $ V.Success())
@@ -703,9 +717,9 @@ getClassInheritenceCycleErrors' ValidTypeClazz {..} classes = do
 getTypedClazz :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] TypedClazz)
 getTypedClazz cls@ValidTypeClazz {..} = do
   typedMethodList <- getMethodsTermTypeErrors cls
-  let (parentClass,_) = vcParent
-  let parentClassName = getErasedTypeName parentClass
-  return $ NewTypedClazz (P.CPublic:vcAccessFlags) vcName parentClassName vcFields <$> typedMethodList
+  let parentCrtw = fst vcParent
+  let interfaceCrtws = fmap fst vcInterfaces
+  return $ NewTypedClazz (P.CPublic:vcAccessFlags) vcName parentCrtw interfaceCrtws vcFields <$> typedMethodList
 
 getMethodsTermTypeErrors :: ValidTypeClazz -> StateT ValidTypeClassData IO (V.Validation [TypeError] [TypedMethod])
 getMethodsTermTypeErrors cls@ValidTypeClazz {..} =
@@ -736,7 +750,13 @@ checkMethodTermType cls@ValidTypeClazz {..} method@ValidTypeMethod {vmMaybeImpl=
                 typedTermNarrowCastIfNecessary <- addNarrowingCast typedTerm (convertTypeCheckerJavaType vmType)
                 return $ V.Success (NewTypedMethod methodName (VT.toList vmParams) vmType (Just (TypedMethodImpl typedTermNarrowCastIfNecessary)))
               else
-                return $ V.Failure [TypeError ("Incorrect return type: "++show (getTypedTermType typedTerm)) pos]
+                return $ V.Failure
+                  [TypeError
+                    ("incompatible types: "++
+                      show (getTypedTermType typedTerm)++
+                      " cannot be converted to "++
+                      show vmType)
+                    (getValidTypeTermPosition vmiTerm)]
           TypeCheckerJavaReferenceType rtw ->
             ifM (isSubtypeOf
                   (TypeCheckerClassRefType (getBoxedType termType))
@@ -749,7 +769,13 @@ checkMethodTermType cls@ValidTypeClazz {..} method@ValidTypeMethod {vmMaybeImpl=
                     (VT.toList vmParams)
                     vmType
                     (Just (TypedMethodImpl typedTermNarrowCastIfNecessary))))
-              (return $ V.Failure [TypeError ("Incorrect return type: "++show (getTypedTermType typedTerm)) pos])
+              (return $ V.Failure
+                [TypeError
+                  ("incompatible types: "++
+                    show (getTypedTermType typedTerm)++
+                    " cannot be converted to "++
+                    show vmType)
+                  (getValidTypeTermPosition vmiTerm)])
 checkMethodTermType cls@ValidTypeClazz {..} method@ValidTypeMethod {vmMaybeImpl=Just ValidTypeConstructorImplementation{..},..} = do
   typeData <- get
   let constructorRightEnvironment = createConstructorEnvironmentRight typeData cls method

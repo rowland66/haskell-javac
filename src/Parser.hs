@@ -28,7 +28,7 @@ module Parser
   , constructSimpleName
   , ClassAccessFlag(..)
   , MethodAccessFlag(..)
-  , Clazz(NewClazz)
+  , Clazz(..)
   , Field(NewField)
   , Constructor(NewConstructor)
   , Method(NewMethod)
@@ -67,7 +67,16 @@ data Field = NewField [TokenPos] TokenPos deriving Show -- Type with TypeArgs, N
 
 data Method = NewMethod [MethodAccessFlag] [TokenPos] TokenPos [TokenPos] Body deriving Show
 
-data Clazz = NewClazz SourcePos CompilationUnit QualifiedName [ClassAccessFlag] (Maybe [TokenPos]) [Field] [Constructor] [Method] deriving Show
+data Clazz = NewClazz { pos :: SourcePos
+                      , complilationUnit :: CompilationUnit
+                      , clazzName :: QualifiedName
+                      , accessFlags :: [ClassAccessFlag]
+                      , maybeSuperClazzName :: (Maybe [TokenPos])
+                      , interfaceClazzNames :: [TokenPos]
+                      , fields :: [Field]
+                      , constructors :: [Constructor]
+                      , methods :: [Method]
+                      } deriving Show
 
 data ClazzMember = ConstructorMember Constructor | FieldMember Field | MethodMember Method deriving Show
 
@@ -75,7 +84,7 @@ data CompilationUnit = CompilationUnit {classpath :: ClassPath, package :: [T.Te
 
 instance Show CompilationUnit where
   show CompilationUnit{..} = "Comp Unit"
-  
+
 sep = T.singleton '/'
 
 parseCompilationUnit :: ClassPath -> NameToPackageMap -> [TokenPos] -> Either ParseError [Clazz]
@@ -177,6 +186,15 @@ extendsClause = do
     Nothing -> return tp
     Just typeArgs -> return $ tp++typeArgs
 
+implementsClause :: (Stream s Identity (Token, SourcePos)) => Parsec s u [TokenPos]
+implementsClause = do
+  satisfyKeyword "implements"
+  tp <- satisfyQualifiedName
+  maybeTypeArguments <- optionMaybe typeArgumentList
+  case maybeTypeArguments of
+    Nothing -> return tp
+    Just typeArgs -> return $ tp++typeArgs
+
 fieldDeclaration :: (Stream s Identity (Token, SourcePos)) => Parsec s u ClazzMember
 fieldDeclaration = do
   javaTypeTokens <- javaType
@@ -207,7 +225,7 @@ typeArgumentList' existingTokens = do
       subTypeArgToks <- typeArgumentList' (existingTokens++typeArgToks++[lAngleToken])
       rAngleToken <- satisfy RAngleBracket
       return (subTypeArgToks++[rAngleToken])
-    
+
 constructorDeclaration :: (Stream s Identity (Token, SourcePos)) => T.Text -> Parsec s u ClazzMember
 constructorDeclaration className = do
   pos <- token (\(tok, pos) -> show tok) snd (\(tok, pos) -> case tok of (Ide nm) | nm == className -> Just pos; _ -> Nothing)
@@ -245,13 +263,16 @@ clazzDeclaration = do
   maybeAbstract <- try $ optionMaybe $ satisfyKeyword "abstract"
   (clazz@(SimpleName clazzName), pos) <- clazzClause
   maybeSuperClazz <- optionMaybe extendsClause
+  maybeImplementsClazz <- optionMaybe implementsClause
   satisfy LBrace
   clazzMembers <- classMemberDeclarations clazzName
   satisfy RBrace
   rest <- manyTill anyToken eof
   let af = case maybeAbstract of Just _ -> [CAbstract]; Nothing -> []
   let newClazz = NewClazz
-                   pos cu (QualifiedName package clazz) af maybeSuperClazz
+                   pos cu (QualifiedName package clazz) af
+                   maybeSuperClazz
+                   (fromMaybe [] maybeImplementsClazz)
                    ((\(FieldMember f) -> f) <$> filter (\case (FieldMember _) -> True; _ -> False) clazzMembers)
                    ((\(ConstructorMember c) -> c) <$> filter (\case (ConstructorMember _) -> True; _ -> False) clazzMembers)
                    ((\(MethodMember m) -> m) <$> filter (\case (MethodMember _) -> True; _ -> False) clazzMembers)

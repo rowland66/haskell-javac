@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module ClassWriter
   ( writeClass
   ) where
@@ -15,8 +17,8 @@ import qualified Data.Text as T
 import TypeCheckerTypes
 
 writeClass :: FilePath -> TypedClazz -> IO ()
-writeClass outputDirectory clazz@(NewTypedClazz _ nameVtn _ _ _) = do
-  let (packageText,nameText) = deconstructQualifiedName (getValidTypeQName nameVtn)
+writeClass outputDirectory clazz@NewTypedClazz{..} = do
+  let (packageText,nameText) = deconstructQualifiedName (getValidTypeQName ntcClassName)
   let packageDirectory = (if null packageText then "" else sep++T.unpack (pathFromTextList packageText))
   createDirectoryIfMissing True (outputDirectory++packageDirectory)
   handle <- openFile (outputDirectory++packageDirectory++"/"++T.unpack nameText++".class") WriteMode

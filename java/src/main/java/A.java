@@ -5,19 +5,21 @@ import java.util.List;
 import java.util.LinkedList;
 import java.util.TimeZone;
 import test.BoundTest;
+import featherjava.lang.IntegerMath;
+import java.util.function.BinaryOperator;
 
-class A extends Object {
+public class A extends Object {
   String foo;
   String foo2;
   Integer bar;
   Boolean b;
   int c;
 
-  Vector<Number> v;
-  List<Integer> e;
+  public Vector<Number> v;
+  public List<Integer> e;
   BoundTest<Integer> btest;
 
-  A() {
+  public A() {
     super();
     this.foo = "Rowland";
     this.foo2 = "Smith";
@@ -25,32 +27,32 @@ class A extends Object {
     this.b = true;
     this.c = 0;
     this.v = new Vector<Number>();
-    this.e = new LinkedList<Integer>();
+    this.e = List.<Integer>of(1,2,3,4);
     this.btest = new BoundTest<Integer>(4);
   }
 
-  A(String f) {
+  public A(String f) {
     this();
     this.foo = f;
   }
 
-  Pair test(B foo, Pair bar) {
+  public Pair test(B foo, Pair bar) {
     return new Pair(foo, new A());
   }
 
-  Integer getInt() {
+  public Integer getInt() {
     return this.bar;
   }
 
-  String getStr() {
+  public String getStr() {
     return this.foo.concat(" Smith").toUpperCase();
   }
 
-  String addString(String a) {
+  public String addString(String a) {
     return this.foo.concat(a); // This is another test comment.
   }
 
-  Integer addInt(Integer a) {
+  public Integer addInt(Integer a) {
     return featherjava.lang.IntegerMath.add(this.bar, featherjava.lang.IntegerMath.mul(a,2));
   }
   
@@ -58,76 +60,87 @@ class A extends Object {
     Calling method with parameters of different types, and boxing result.
   */
 
-  Boolean testPut(List<Integer> a) {
+  public Boolean testPut(List<Integer> a) {
     return this.v.addAll(a);
   }
 
-  Number testGet() {
+  public Number testGet() {
     return this.v.get(0);
   }
 
-  Integer compare(String a) {
+  public Integer compare(String a) {
     return this.foo.compareTo(a);
   }
   
-  Integer getCodePoint() {
+  public Integer getCodePoint() {
     return this.foo.codePointAt(Math.min(Math.subtractExact(this.foo2.length(),1),Math.subtractExact(this.foo.length(),1)));
   }
 
-  Integer calcFloorDiv(Integer a) {
+  public Integer calcFloorDiv(Integer a) {
     return java.lang.Math.floorDiv(this.bar,a);
   }
 
-  Integer getStringFromInt(Integer a, Integer b) {
+  public Integer getStringFromInt(Integer a, Integer b) {
     return "SuperFoo".replaceAll(this.bar.equals(a) ? "Eq" : "Ne",this.bar.equals(a) ? "Eq" : "Ne").length();
     //return (this.bar.equals(a) ? "Eq" : "Ne");
   }
 
-  Integer paramTester(String a, String b) {
+  public Integer paramTester(String a, String b) {
     return this.getStringFromInt(a.equals("Ne") ? Integer.sum(4,2) : 2, b.equals("Ne") ? 3 : 1);
   }
 
-  Object lubTest() {
+  public Object lubTest() {
     return (this.b ? new B() : new C());
   }
 
-  String getDefaultTZ() {
+  public String getDefaultTZ() {
     return TimeZone.getDefault().getDisplayName();
   }
 
-  Integer abstractTest(Number a) {
+  public Integer abstractTest(Number a) {
     return a.intValue();
   }
 
-  Integer staticFieldTest(Integer a) {
+  public Integer staticFieldTest(Integer a) {
     return Integer.BYTES;
   }
 
-  Integer staticMethodTest() {
+  public Integer staticMethodTest() {
     return this.bar.bitCount(this.bar);
   }
   
-  List<Integer> createList(Integer a, Integer b, Integer c) {
+  public List<Integer> createList(Integer a, Integer b, Integer c) {
     return List.<Integer>of(a,b,c);
   }
 
-  Integer getListInt() {
+  public Integer getListInt() {
     return this.createList(1,2,3).get(1);
   }
   
-  Integer getStringFromIntList() {
+  public Integer getStringFromIntList() {
     return this.getStringFromInt(this.createList(1,2,3).get(0), 12);
   }
 
-  Integer getBoundTestValue() {
+  public Integer getBoundTestValue() {
     return this.btest.getValue();
   }
 
-/**
-  List<? super Integer> copyList(List<Number> x) {
-    return List.<Number>copyOf(x);
-  } */
+  public Integer listSum() {
+    return this.e.stream().<Integer>reduce(0, new SumMaker());
+  }
 }
+
+class SumMaker implements BinaryOperator<Integer> {
+  
+  public SumMaker() {
+    super();
+  }
+
+  public Integer apply(Integer a, Integer b) {
+    return IntegerMath.add(a, b);
+  }
+}
+
 /**
 class StringReaderTest extends Object {
 

@@ -108,7 +108,7 @@ class TypeInfo_ t where
 instance TypeInfo_ ValidTypeClazz where
   getTypeName ValidTypeClazz {..} = vcName
   getTypeParent ValidTypeClazz {..} = fst vcParent
-  getTypeImplements _ = []
+  getTypeImplements ValidTypeClazz {..} = fmap fst vcInterfaces
   getTypeFields ValidTypeClazz {..} = fmap FieldDeclaration vcFields
   getTypeMethods ValidTypeClazz {..} = fmap MethodDeclaration vcMethods
   getTypeAccessFlags ValidTypeClazz {..} = ClassAccessFlags { caAbstract = P.CAbstract `elem` vcAccessFlags

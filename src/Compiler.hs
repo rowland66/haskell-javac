@@ -107,7 +107,7 @@ displayTypeErrors :: [TypeError] -> IO ()
 displayTypeErrors = mapM_ (print)
 
 classError :: Clazz -> String -> ParseError
-classError (NewClazz pos _ _ _ _ _ _ _) str = newErrorMessage (Message str) pos
+classError (NewClazz pos _ _ _ _ _ _ _ _) str = newErrorMessage (Message str) pos
 
 defaultNameToPackageMap :: ClassPath -> Maybe NameToPackageMap
 defaultNameToPackageMap cp =

@@ -8,7 +8,6 @@ import java.util.Optional;
 
 public class Main {
 
-
     Integer a;
 
     public Main() {
@@ -40,6 +39,7 @@ public class Main {
         Assert.assertEquals(testList, a.createList(testList.get(0),testList.get(1),testList.get(2)));
         Assert.assertEquals(Integer.valueOf(2), a.getListInt());
         Assert.assertEquals(Integer.valueOf(4), a.getBoundTestValue());
+        Assert.assertEquals(Integer.valueOf(10), a.listSum());
     }
     static Integer java = 5;
     public static void foo(String[] args) {

@@ -150,6 +150,7 @@ data ValidTypeClazz = ValidTypeClazz { vcAccessFlags :: [ClassAccessFlag]
                                      , vcName :: TypeCheckerValidTypeQualifiedNameWrapper
                                      , vcSourcePos :: SourcePos
                                      , vcParent :: (TypeCheckerClassReferenceTypeWrapper, SourcePos)
+                                     , vcInterfaces :: [(TypeCheckerClassReferenceTypeWrapper, SourcePos)]
                                      , vcFields :: [ValidTypeField]
                                      , vcMethods :: [ValidTypeMethod]
                                      } deriving Show
@@ -167,29 +168,38 @@ transformToValidTypes = do
     (Map.elems classMap)
 
 getValidTypeClass :: Clazz2 -> StateT ClassData IO (Val.Validation [TypeError] ValidTypeClazz)
-getValidTypeClass cls@(NewClazz2 pos _ vcAccessFlags nm _ _ _) = do
+getValidTypeClass cls@(NewClazz2 pos _ vcAccessFlags nm _ _ _ _) = do
   let validTypeQualifiedName = typeValidatorValidTypeName nm
   validTypeParentV <- getClassParentValidType cls
+  validTypeInterfacesV <- getClassInterfacesValidTypes cls
   validTypeFieldsV <- getValidTypeFields cls validTypeQualifiedName
   validTypeMethodsV <- getValidTypeMethods cls validTypeQualifiedName
-  return $ ValidTypeClazz vcAccessFlags validTypeQualifiedName pos <$> validTypeParentV <*> validTypeFieldsV <*> validTypeMethodsV
+  return $ ValidTypeClazz vcAccessFlags validTypeQualifiedName pos <$> validTypeParentV <*> validTypeInterfacesV <*> validTypeFieldsV <*> validTypeMethodsV
 
 getClassParentValidType :: Clazz2 -> StateT ClassData IO (Val.Validation [TypeError] (TypeCheckerClassReferenceTypeWrapper, SourcePos))
-getClassParentValidType (NewClazz2 pos _ _ _ ExtendsObject _ _) =
+getClassParentValidType (NewClazz2 pos _ _ _ Nothing _ _ _) =
   return $
     Val.Success (createValidTypeClassTypeObject, pos)
-getClassParentValidType (NewClazz2 _ _ _ _ (NewExtends pos parent typeArgs) _ _) = do
+getClassParentValidType (NewClazz2 _ _ _ _ (Just classRef) _ _ _) = do
+  getValidClassReference classRef
+
+getClassInterfacesValidTypes :: Clazz2 -> StateT ClassData IO (Val.Validation [TypeError] [(TypeCheckerClassReferenceTypeWrapper, SourcePos)])
+getClassInterfacesValidTypes (NewClazz2 _ _ _ _ _ interfaceClassRefs _ _) = do
+  sequenceA <$> mapM getValidClassReference interfaceClassRefs
+
+getValidClassReference :: ClassReference -> StateT ClassData IO (Val.Validation [TypeError] (TypeCheckerClassReferenceTypeWrapper, SourcePos))
+getValidClassReference (ClassReference pos parent typeArgs) = do
   vtqnE <- validateM [TypeError ("Undefined type: "++show parent) pos] getValidTypeQualifiedName parent
-  typeArgsE <- 
-    (\(Val.Success tas) -> 
-      case tas of 
-        [] -> Val.Success Nothing; 
-        xs -> Val.Success (Just (V.fromList xs))) 
+  typeArgsE <-
+    (\(Val.Success tas) ->
+      case tas of
+        [] -> Val.Success Nothing;
+        xs -> Val.Success (Just (V.fromList xs)))
     <$> getValidTypeTypeArguments typeArgs
   return $ (,) <$> (TypeCheckerClassReferenceTypeWrapper <$> vtqnE <*> typeArgsE) <*> pure pos
 
 getValidTypeFields :: Clazz2 -> TypeCheckerValidTypeQualifiedNameWrapper -> StateT ClassData IO (Val.Validation [TypeError] [ValidTypeField])
-getValidTypeFields (NewClazz2 _ _ _ _ _ fields _) vtqn =
+getValidTypeFields (NewClazz2 _ _ _ _ _ _ fields _) vtqn =
   foldrM
     (\field fieldList -> do
       validTypeFieldE <- getValidTypeField vtqn field
@@ -208,11 +218,11 @@ getValidTypeField vtqn field@(NewField (JavaReferenceType (ClassType pos tp tpar
   let validTypeFieldV = ValidTypeField (nm,npos) <$> jtE <*> pure vtqn
   return validTypeFieldV
 getValidTypeField vtqn field@(NewField (JavaReferenceType _) npos nm) = undefined
-getValidTypeField vtqn field@(NewField (JavaPrimitiveType (PrimitiveIntegralType pos)) npos nm) = 
+getValidTypeField vtqn field@(NewField (JavaPrimitiveType (PrimitiveIntegralType pos)) npos nm) =
   return $ Val.Success $
     ValidTypeField (nm,npos) (TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType) vtqn
-getValidTypeField vtqn field@(NewField (JavaPrimitiveType (PrimitiveBooleanType pos)) npos nm) = 
-  return $ Val.Success $ 
+getValidTypeField vtqn field@(NewField (JavaPrimitiveType (PrimitiveBooleanType pos)) npos nm) =
+  return $ Val.Success $
     ValidTypeField (nm,npos) (TypeCheckerJavaPrimitiveType TypeCheckerBooleanPrimitiveType) vtqn
 
 consEither :: Either [a] b -> Either [a] [b] -> Either [a] [b]
@@ -226,7 +236,7 @@ consEither head list =
       Left x -> Left x
 
 getValidTypeMethods :: Clazz2 -> TypeCheckerValidTypeQualifiedNameWrapper -> StateT ClassData IO (Val.Validation [TypeError] [ValidTypeMethod])
-getValidTypeMethods (NewClazz2 _ _ _ _ _ _ methods) vtqnw =
+getValidTypeMethods (NewClazz2 _ _ _ _ _ _ _ methods) vtqnw =
   foldrM (\method either -> do
     validTypeMethodE <- getValidTypeMethod method vtqnw
     return $ (:) <$> validTypeMethodE <*> either)
@@ -254,10 +264,10 @@ getMethodReturnValidType (NewMethod _ _ _ _ (JavaReferenceType tp@(ClassType pos
   let jtE = TypeCheckerJavaReferenceType <$> (TypeCheckerClassRefType <$> crtwE)
   return jtE
 getMethodReturnValidType (NewMethod _ _ _ _ (JavaReferenceType _) _ _) = undefined
-getMethodReturnValidType (NewMethod _ _ _ _ (JavaPrimitiveType (PrimitiveIntegralType pos)) _ _) = 
+getMethodReturnValidType (NewMethod _ _ _ _ (JavaPrimitiveType (PrimitiveIntegralType pos)) _ _) =
   return $ Val.Success $
     TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType
-getMethodReturnValidType (NewMethod _ _ _ _ (JavaPrimitiveType (PrimitiveBooleanType pos)) _ _) = 
+getMethodReturnValidType (NewMethod _ _ _ _ (JavaPrimitiveType (PrimitiveBooleanType pos)) _ _) =
   return $ Val.Success $
     TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType
 
@@ -278,9 +288,9 @@ getValidTypeParam (NewParameter (JavaReferenceType tp@(ClassType pos qn typeArgs
   let jtE = TypeCheckerJavaReferenceType <$> (TypeCheckerClassRefType <$> crtwE)
   return $ ValidTypeParameter (nm,nmpos) <$> jtE
 getValidTypeParam (NewParameter (JavaReferenceType _) nmpos nm) = undefined
-getValidTypeParam (NewParameter (JavaPrimitiveType (PrimitiveIntegralType pos)) nmpos nm) = 
+getValidTypeParam (NewParameter (JavaPrimitiveType (PrimitiveIntegralType pos)) nmpos nm) =
   return $ Val.Success $ ValidTypeParameter (nm,nmpos) (TypeCheckerJavaPrimitiveType TypeCheckerIntegerPrimitiveType)
-getValidTypeParam (NewParameter (JavaPrimitiveType (PrimitiveBooleanType pos)) nmpos nm) = 
+getValidTypeParam (NewParameter (JavaPrimitiveType (PrimitiveBooleanType pos)) nmpos nm) =
   return $ Val.Success $ ValidTypeParameter (nm,nmpos) (TypeCheckerJavaPrimitiveType TypeCheckerBooleanPrimitiveType)
 
 getValidTypeTypeArguments :: [TypeArgument] -> StateT ClassData IO (Val.Validation [TypeError] [TypeCheckerTypeArgument])
@@ -438,7 +448,27 @@ mapValidTypeTypeArgument (ReferenceTypeArgument (ClassType tppos qn typeArgs)) =
       in
         return $ TypeCheckerTypeArgument Nothing <$> crtE
 mapValidTypeTypeArgument (ReferenceTypeArgument (TypeVariable pos sn)) = undefined
-mapValidTypeTypeArgument (WildcardArgument wildcardBounds) = undefined
+mapValidTypeTypeArgument (WildcardArgument (ExtendsBounds (ClassType pos qn typeArgs))) = do
+  vtqnwE <- validateM [TypeError ("Type argument is not a valid type: "++show qn) pos] getValidTypeQualifiedName qn
+  validTypeArgsE <- mapValidTypeTypeArguments typeArgs
+  let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
+        vtqnwE <*>
+        fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeArgsE
+      crtE = TypeCheckerClassRefType <$> crtwE
+      in
+        return $ TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorExtends) <$> crtE
+
+mapValidTypeTypeArgument (WildcardArgument (ExtendsBounds (TypeVariable {}))) = undefined
+mapValidTypeTypeArgument (WildcardArgument (SuperBounds (ClassType pos qn typeArgs))) = do
+  vtqnwE <- validateM [TypeError ("Type argument is not a valid type: "++show qn) pos] getValidTypeQualifiedName qn
+  validTypeArgsE <- mapValidTypeTypeArguments typeArgs
+  let crtwE = TypeCheckerClassReferenceTypeWrapper <$>
+        vtqnwE <*>
+        fmap (\args -> case args of [] -> Nothing; as -> Just (V.fromList as)) validTypeArgsE
+      crtE = TypeCheckerClassRefType <$> crtwE
+      in
+        return $ TypeCheckerTypeArgument (Just ValidTypeWildcardIndicatorSuper) <$> crtE
+mapValidTypeTypeArgument (WildcardArgument (SuperBounds (TypeVariable {}))) = undefined
 
 mapValidTypeTypeArguments :: [TypeArgument] -> StateT ClassData IO (Val.Validation [TypeError] [TypeCheckerTypeArgument])
 mapValidTypeTypeArguments typeArgs = do

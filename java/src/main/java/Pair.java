@@ -26,23 +26,6 @@ class B extends A {
 
 }
 
-class C extends A {
-  AbstractTest absTest;
-
-  C() {
-    super();
-    this.absTest = new AbstractImpl();
-  }
-
-  Integer getAbstractNumber() {
-    return this.absTest.getMyNumber();
-  }
-
-  String getString() {
-    return this.absTest.getString();
-  }
-}
-
 abstract class AbstractTest {
 
   AbstractTest() {
